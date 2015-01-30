@@ -43,7 +43,7 @@ John the Ripper already has dynamic formats: separate crypto primitives could be
 
 NetBSD uses X-Macro technique: for example to make sha512-crypt and sha256-crypt from sha-512, sha-256 and crypt definitions.
 
-[libcorc](http://code.entropywave.com/orc/)
+[liborc](http://code.entropywave.com/orc/)
 "Orc is a just-in-time compiler implemented as a library and set of associated tools for compiling and executing simple programs that operate on arrays of data.  Orc is unlike other general-purpose JIT engines: the Orc bytecode and language is designed so that it can be readily converted into SIMD instructions.  This translates to interesting language features and limitations: Orc has built-in capability for SIMD-friendly operations such as shuffling, saturated addition and subtraction, but only works on arrays of data."
 
 GCC now has support for [OpenACC](http://www.openacc.org/) (via -fopenacc). So code can be easily converted into accelerated.
