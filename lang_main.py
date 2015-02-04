@@ -162,6 +162,11 @@ def comment(text, *args):
     # %% check for new lines
     Code.append("comment " + text.format(*args))
 
+def debug_print_var(var, comment):
+    # %% print number of bits?
+    # DEF %%
+    Code.append("debug_print_var {0} {1}".format(var.name, comment))
+
 code = sys.stdin.read()
 exec(code)
 for i in Code:

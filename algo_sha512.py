@@ -34,7 +34,7 @@ k = [
 ]
 k = MyArray('k', [Const(v) for v in k])
 
-comment('before extension of w')
+# comment('before extension of w')
 
 # %% hint that for optimization too
 for i in range(16, 80):
@@ -42,15 +42,19 @@ for i in range(16, 80):
     s1 = ror(w[i-2], 19) ^ ror(w[i-2], 61) ^ (w[i-2] >> 6)
     w[i] = w[i - 16] + s0 + w[i - 7] + s1
 
-for v in w:
-    comment("v in w: " + str(v))
+# for v in w:
+#     comment("v in w: " + str(v))
 
 # comment('input: {0}', " ".join(str(v) for v in w))
 
+# # %% do that not on MyArray
+# for jt, vt in enumerate(w):
+#     debug_print_var(vt, 'w[{0}]'.format(jt))
+
 w = MyArray('w', w)
 
-comment('after extension of w')
-comment('before main loop')
+# comment('after extension of w')
+# comment('before main loop')
 
 a, b, c, d, e, f, g, h = [Var() for i in range(8)]
 a // H[0];
@@ -61,7 +65,7 @@ e // H[4];
 f // H[5];
 g // H[6];
 h // H[7];
-comment('varsbefore ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
+# comment('varsbefore ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
 
 # Main loop
 i = cycle_const_range('main', 0, 79, 1)
@@ -81,7 +85,7 @@ d // c
 c // b
 b // a
 a // (t1 + t2)
-comment('vars ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
+# comment('vars ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
 
 # End of main loop
 cycle_end('main')
@@ -103,7 +107,7 @@ cycle_end('main')
 #     b = a
 #     a = (t1 + t2)
 
-comment('after main loop')
+# comment('after main loop')
 
 # Updating state
 H[0] += a

@@ -134,7 +134,7 @@ def partition(l, n):
     return zip(*[iter(l)] * n)
 
 def print_bs(args):
-    c('printf("out:");')
+    # c('printf("out:");')
     # %% compute 64
     for i in range(len(args) / 64):
         # собираем биты от 64 чисел
@@ -157,7 +157,7 @@ def out_all(code):
                 # %% почему это не нужно?
                 #c('#define {0} ({1})', l[1], " | ".join('((({1} & (0xff << ({0} * 8))) >> ({0} * 8)) << ((8 - {0} - 1) * 8))'.format(i, l[2]) for i in range(8)))
                 c('#define {0} {1}', l[1], l[2])
-                c('printf(">> %016llx\\n", {0});', l[1])
+                c('printf(">>> %016llx\\n", {0});', l[1])
             elif l[4] == 'noop':
                 # %% другие типы, параметризация этого
                 # %% описание типов у операций
@@ -259,11 +259,18 @@ def out_all(code):
             # %% вот тут у нас в одну переменную должны собираться от
             # нескольких строк биты, сейчас только первый; строки
             # имеют одно имя
-            c('unsigned long long {0} = ({1}_bit_length & (1ULL << (64 - {2} - 1))) >> (64 - {2} - 1);', *l[1:])
+            # Здесь обработка не такая же, как для ввода.
+            c('unsigned long long {0} = ({1}_bit_length & (1ULL << {2})) >> {2};', *l[1:])
             g.bit_length_bits.append(l[1])
             if len(g.bit_length_bits) % 64 == 0:
                 print_bs(g.bit_length_bits)
                 g.bit_length_bits = []
+        elif l[0] == 'debug_print_var':
+            v = l[1:65]
+            comment = " ".join(l[65:])
+            # %% quoting
+            c('printf("%s:", "{0}");', comment)
+            print_bs(v)
         elif l[0] == 'getitem':
             c('unsigned long long {0} = {1}[{2}][{3}];', *l[1:])
         else:

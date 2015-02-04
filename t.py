@@ -1,13 +1,34 @@
 # -*- coding: utf-8 -*-
 # временный скрипт для начала работы с sha512
 
+import sys
 import os
 from string import Template
 
 import re
 
 def get_code(name):
-    return os.popen('python lang_main.py < algo_{0}.py'.format(name)).read()
+    # %% needs a patched trace.py that outputs to stderr, may bypass
+    # it prefixing bytecode lines to distinguish them from tracer's
+    # output
+    # %% capture output of tracer
+    decor = ("#" * 15) + " {0} " + ("#" * 15)
+    # use_tracer = False
+    # use_tracer = True
+    use_tracer = sys.argv[1] == "t"
+    tracer_options = '-m trace --ignore-dir=/usr -t'
+    print >> sys.stderr, decor.format('BEGIN OF {0}'.format(name))
+    # %% remove temporary file and `cat`, or make as an option for debug
+    # pipe = os.popen('python {1} lang_bs_main.py < algo_{0}.py'.format(name, tracer_options if use_tracer else ''))
+    pipe = os.popen('python {1} lang_main.py < algo_{0}.py > {0}.bytecode && cat {0}.bytecode'.format(name, tracer_options if use_tracer else ''))
+    output = pipe.read()
+    print >> sys.stderr, decor.format('END OF {0}'.format(name))
+    c = pipe.close()
+    if c and c > 0:
+        # print >> sys.stderr, "hi there << {0}".format(c)
+        # ** c may be 256
+        exit(1)
+    return output
 
 sha512 = get_code('sha512')
 padding = get_code('padding')
@@ -176,6 +197,10 @@ def out_all(code):
             # cycle_end main
             # %% use cycle name
             c('}}')
+        elif l[0] == 'debug_print_var':
+            comment = " ".join(l[2:])
+            # %% quoting
+            c('printf("%s: %016llx\\n", "{0}", {1});', comment, l[1])
         elif l[0] == 'output':
             # output sha512_var661
             g.out_names.append(l[1])
