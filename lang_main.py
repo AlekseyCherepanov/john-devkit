@@ -4,13 +4,15 @@
 import sys
 import subprocess
 
+from lang_common import args
+
 Code = []
 Steps = {}
 
 # %% Per var endianness and size
 
 class Var(object):
-    endianness = 'not set'
+    endianness = 'not_set'
     size = 0
     count = 0
     @staticmethod

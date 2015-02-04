@@ -6,13 +6,15 @@
 import sys
 import subprocess
 
+from lang_common import args
+
 Code = []
 Steps = {}
 
 # %% Per var endianness and size
 
 class Var(object):
-    endianness = 'not set'
+    endianness = 'not_set'
     size = 0
     bits = 0
     count = 0
@@ -39,12 +41,12 @@ class Var(object):
                         # %% specific for bitslice, update regular version
                         # to support that op
                         # DEF getitem: target_name array_name index_name bit_index
-                        Code.append("getitem {0} {1} {2} {3}".format(self.names[i], arg1.name, arg2.name, i))
+                        Code.append("bitslice_getitem {0} {1} {2} {3}".format(self.names[i], arg1.name, arg2.name, i))
                     elif op == 'bit_length':
                         # %% specific for bitslice, update regular version
                         # to support that op
                         # DEF bit_length: target_name string_name bit_index
-                        Code.append("bit_length {0} {1} {2}".format(self.names[i], arg1.name, i))
+                        Code.append("bitslice_bit_length {0} {1} {2}".format(self.names[i], arg1.name, i))
                     else:
                         # DEF op: target_name arg1_name arg2_name op
                         # DEF op: target_name 'None' 'None' 'noop'
@@ -156,6 +158,7 @@ class BitConst(Var):
         return self.name
 all_zero = 0
 all_one = ~all_zero
+# %% these should be initialized after Var.setup
 BitConst.zero = BitConst(all_zero)
 BitConst.one = BitConst(all_one)
 
@@ -168,7 +171,7 @@ class Const(Var):
         # просто собираются из них
         self.names = []
         for i in range(Var.bits):
-            self.names.insert(0, BitConst.one if c & (1 << i) else BitConst.zero)
+            self.names.insert(0, BitConst.one.name if c & (1 << i) else BitConst.zero.name)
 
 def to_const_maybe(a):
     if not isinstance(a, Var):
@@ -228,7 +231,7 @@ class input_string(Var):
         # %% тут надо подумать, если читаем мы не в инты, а сразу на
         # биты режем
         # DEF %%
-        Code.append("string_get_ints_with_bit_on_the_end {0} {1} {2} {3} {4}".format(self.name, Var.endianness, Var.size, number, " ".join(str(v) for v in vs)))
+        Code.append("bitslice_string_get_ints_with_bit_on_the_end {0} {1} {2} {3} {4}".format(self.name, Var.endianness, Var.size, number, " ".join(str(v) for v in vs)))
         return vs
     def get_bit_length(self):
         return Var(self, 'bit_length')
@@ -258,7 +261,7 @@ class MyArray(object):
     def __init__(self, name, arr):
         self.name = "array_" + name
         # DEF %%
-        Code.append("array {0} {1}".format(self.name, " ".join(str(v) for v in arr)))
+        Code.append("bitslice_array {0} {1}".format(self.name, " ".join(str(v) for v in arr)))
     def __getitem__(self, i):
         # %% regular num index
         if not isinstance(i, CycleVar):
@@ -291,7 +294,7 @@ def comment(text, *args):
 def debug_print_var(var, comment):
     # %% print number of bits?
     # DEF %%
-    Code.append("debug_print_var {0} {1}".format(" ".join(var.names), comment))
+    Code.append("bitslice_debug_print_var {0} {1}".format(" ".join(var.names), comment))
 
 code = sys.stdin.read()
 exec(code)

@@ -47,7 +47,7 @@ for i in range(16, 80):
 
 # comment('input: {0}', " ".join(str(v) for v in w))
 
-# # %% do that not on MyArray
+# # do that not on MyArray
 # for jt, vt in enumerate(w):
 #     debug_print_var(vt, 'w[{0}]'.format(jt))
 

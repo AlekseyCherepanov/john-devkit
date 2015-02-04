@@ -12,6 +12,7 @@ The current main priority is to support GPUs including on-gpu mask-mode.
 
 john-devkit has now:
   * sha-512
+  * sha-256
   * trivial merging of separately described algorithms
   * bitslice
   * output to standalone program
@@ -23,13 +24,13 @@ Nearest plans:
   * try kernel splitting
   * loop unrolling (full and partial)
 
-There is no documentation for dsl and bytecode.
+There is no documentation for dsl and bytecode. It is not obvious how many times everything will be changed drastically.
 
 ## Usage
 
-Current usage is very limited. Example of test for current sha-512:
+Current usage is very limited. Example of test for current sha-512 (using bitslice):
 
-`$ CAND=MAXLENGTHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA time bash -c 'python t.py "$1" > t.c && gcc -Wfatal-errors t.c && ./a.out $CAND && printf $CAND | sha512sum | perl -pe "s/.{16}/$& /g"' --`
+`$ CAND=MAXLENGTHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA time bash -c 'python format_standalone_sha256.py "$1" "$2" > t.c && echo "hi there $?" && gcc -Wfatal-errors t.c && ./a.out "$CAND" && printf '%s' "$CAND" | sha256sum | perl -pe "s/.{8}/$& /g"' -- '' b`
 
 ## Other approaches
 
