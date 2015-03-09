@@ -1,18 +1,24 @@
-# SHA512 abstract
+# abstract SHA512
 # http://en.wikipedia.org/wiki/SHA512
 
 Var.setup('be', 8)
 
+w = make_array('w', 80)
+
+# print_var(0x1234)
+
 # Getting in
-w = [None for i in range(0, 80)]
 for i in range(0, 16):
-    w[i] = input()
+    t = input()
+    set_item(w, i, t)
+    # print_var(t)
+    # print_var(w[i])
 
 # comment('input: {0}', " ".join(str(v) for v in w[0:16]))
 
 # State, Getting in too
 H_default = [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179]
-H = [state(v) for v in H_default]
+H = [new_state_var(v) for v in H_default]
 
 k = [
     0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc, 0x3956c25bf348b538,
@@ -32,50 +38,76 @@ k = [
     0x113f9804bef90dae, 0x1b710b35131c471b, 0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc,
     0x431d67c49c100d4c, 0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817
 ]
-k = MyArray('k', [Const(v) for v in k])
+k = new_array('k', *[new_const(v) for v in k])
 
 # comment('before extension of w')
 
-# %% hint that for optimization too
-for i in range(16, 80):
-    s0 = ror(w[i-15], 1) ^ ror(w[i-15], 8) ^ (w[i-15] >> 7)
-    s1 = ror(w[i-2], 19) ^ ror(w[i-2], 61) ^ (w[i-2] >> 6)
-    w[i] = w[i - 16] + s0 + w[i - 7] + s1
+i = cycle_const_range('setupW', 16, 80 - 1, 1)
 
-# for v in w:
-#     comment("v in w: " + str(v))
+a = w[i - 15]
+s0 = ror(a,  1) ^ ror(a,  8) ^ (a >> 7)
+b = w[i - 2]
+s1 = ror(b, 19) ^ ror(b, 61) ^ (b >> 6)
+# %% Parenthesis are significant here. Though they does not affect much.
+set_item(w, i, w[i - 16] + s0 + (w[i - 7] + s1))
 
-# comment('input: {0}', " ".join(str(v) for v in w))
+cycle_end('setupW')
 
-# # do that not on MyArray
-# for jt, vt in enumerate(w):
-#     debug_print_var(vt, 'w[{0}]'.format(jt))
-
-w = MyArray('w', w)
+# for i in range(16, 80):
+#     s0 = ror(w[i - 15], 1) ^ ror(w[i - 15], 8) ^ (w[i - 15] >> 7)
+#     s1 = ror(w[i - 2], 19) ^ ror(w[i - 2], 61) ^ (w[i - 2] >> 6)
+#     w[i] = w[i - 16] + s0 + w[i - 7] + s1
+# w = new_array('w', *w)
 
 # comment('after extension of w')
 # comment('before main loop')
 
-a, b, c, d, e, f, g, h = [Var() for i in range(8)]
-a // H[0];
-b // H[1];
-c // H[2];
-d // H[3];
-e // H[4];
-f // H[5];
-g // H[6];
-h // H[7];
+a, b, c, d, e, f, g, h = [new_var() for i in range(8)]
+a // H[0]
+b // H[1]
+c // H[2]
+d // H[3]
+e // H[4]
+f // H[5]
+g // H[6]
+h // H[7]
 # comment('varsbefore ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
+
+# print_var(a)
+# s0 = ror(a, 28) ^ ror(a, 34) ^ ror(a, 39)
+# print_var(ror(a, 28))
+# print_var(s0)
+# maj = (a & b) ^ (a & c) ^ (b & c)
+# print_var(maj)
+# t2 = s0 + maj
+# print_var(t2)
+# s1 = ror(e, 14) ^ ror(e, 18) ^ ror(e, 41)
+# print_var(s1)
+# ch = (e & f) ^ (~e & g)
+# print_var(ch)
+# t1 = h + s1 + ch + k[0] + w[0]
+# print_var(t1)
+# print_var(0xFFFFFF)
 
 # Main loop
 i = cycle_const_range('main', 0, 79, 1)
+
+# print_var(a)
 
 s0 = ror(a, 28) ^ ror(a, 34) ^ ror(a, 39)
 maj = (a & b) ^ (a & c) ^ (b & c)
 t2 = s0 + maj
 s1 = ror(e, 14) ^ ror(e, 18) ^ ror(e, 41)
 ch = (e & f) ^ (~e & g)
-t1 = h + s1 + ch + k[i] + w[i]
+# ** Parenthesis are significant here unless instruction order is not
+#  * changed by optimizations.
+t1 = h + (s1 + ch) + (k[i] + w[i])
+# %% Other variants may be faster; especially when k[i] is not
+#  % replaced by a constant explicitly (e.g. no unroll of 'main').
+# t1 = h + (s1 + k[i]) + (ch + w[i])
+# t1 = s1 + (h + k[i]) + (ch + w[i])
+
+# print_var(a)
 
 h // g
 g // f
@@ -119,6 +151,9 @@ H[5] += f
 H[6] += g
 H[7] += h
 
+label('before_outputs')
+
 # Getting out
 for v in H:
+    # print_var(v)
     output(v)

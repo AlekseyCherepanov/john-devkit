@@ -11,24 +11,30 @@ The current implementation is a Proof of Concept (unusable).
 The current main priority is to support GPUs including on-gpu mask-mode.
 
 john-devkit has now:
-  * sha-512
+  * sha-512 with vectorization and loop unrolling (full and partial)
+
+broken:
   * sha-256
   * trivial merging of separately described algorithms
   * bitslice
+  * full unroll of loops
+  * partial unroll of loops
+  * interleave
   * output to standalone program
+  * output to john's format file
   * output to scalar code
+  * output to sse code
 
 Nearest plans:
   * output formats for john on gpu
   * incorporate on-gpu mask-mode
   * try kernel splitting
-  * loop unrolling (full and partial)
 
 There is no documentation for dsl and bytecode. It is not obvious how many times everything will be changed drastically.
 
 ## Usage
 
-Current usage is very limited. Example of test for current sha-512 (using bitslice):
+Current usage is very limited. Example of test for current sha-256 (using bitslice):
 
 `$ CAND=MAXLENGTHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA time bash -c 'python format_standalone_sha256.py "$1" "$2" > t.c && echo "hi there $?" && gcc -Wfatal-errors t.c && ./a.out "$CAND" && printf '%s' "$CAND" | sha256sum | perl -pe "s/.{8}/$& /g"' -- '' b`
 
@@ -44,7 +50,9 @@ John the Ripper's bitslice implementation of descrypt supports easy configuratio
 
 Billy Bob Brumley demonstrated application of simulated annealing algorithm to scheduling of des s-box instructions. It was considered possible to achieve 10% speed up over gcc modifying scheduling for specific cpu (though gcc is improved fast so the gap should be smaller).
 
-NetBSD uses X-Macro technique: for example to make sha512-crypt and sha256-crypt from sha-512, sha-256 and crypt definitions.
+Roman Rusakov (researched and developed)[http://www.openwall.info/wiki/sbox-opt/des] the way to generate current formulas for des s-boxes used in John the Ripper (and some others hash crackers). Formulas were sorted by length and then by latency on different processors (so different formulas are used depending on platform). The problem of getting formulas is like in VLSI but optimization criteria is a bit different because levels of circuit does directly affect performance as of we are limited by number of registers while use of memory is slow.
+
+NetBSD uses X-Macro technique: for example to make sha512crypt and sha256crypt from sha-512, sha-256 and crypt definitions.
 
 [liborc](http://code.entropywave.com/orc/):
 "Orc is a just-in-time compiler implemented as a library and set of associated tools for compiling and executing simple programs that operate on arrays of data.  Orc is unlike other general-purpose JIT engines: the Orc bytecode and language is designed so that it can be readily converted into SIMD instructions.  This translates to interesting language features and limitations: Orc has built-in capability for SIMD-friendly operations such as shuffling, saturated addition and subtraction, but only works on arrays of data."

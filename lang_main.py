@@ -4,172 +4,169 @@
 import sys
 import subprocess
 
+import bytecode_main as B
+from lang_spec import instructions
+
 from lang_common import args
 
-Code = []
-Steps = {}
+# %% проверки повторения меток
 
-# %% Per var endianness and size
-
-class Var(object):
-    endianness = 'not_set'
-    size = 0
+class Var():
     count = 0
+    def __init__(self):
+        Var.count += 1
+        self.name = 'var' + str(Var.count)
     @staticmethod
     def setup(e, s):
-        if e not in ['le', 'be']:
-            raise ValueError('endianness should be either "le" or "be"')
-        Var.endianness = e
-        Var.size = s
-    def __init__(self, arg1 = None, op = None, arg2 = None):
-        self.name = "var" + str(Var.count)
-        Var.count += 1
-        if arg1:
-            if op != "getitem":
-                arg1 = to_const_maybe(arg1)
-                arg2 = to_const_maybe(arg2)
-            Code.append("op {0} {1} {3} {2}".format(self.name, arg1.name, op, arg2.name))
-        else:
-            Code.append("op {0} None None noop".format(self.name))
-    def __str__(self):
-        return self.name
-    # Binary
-    def __add__(self, b):
-        return Var(self, "+", b)
-    def __sub__(self, b):
-        return Var(self, "-", b)
-    def __mul__(self, b):
-        return Var(self, "*", b)
-    def __xor__(self, b):
-        return Var(self, "^", b)
-    def __rshift__(self, b):
-        return Var(self, ">>", b)
-    def __and__(self, b):
-        return Var(self, "&", b)
-    def __or__(self, b):
-        return Var(self, "|", b)
-    def __floordiv__(self, b):
-        # Means assignment, a // b is equal to a = b; in C
-        # %% Bad priority: a // (b + c) is for a = b + c, not nice
-        # %% raise error on assignment to const
-        # %% user has to create a variable before assignment
-        Code.append("assign {0} {1}".format(self, b))
-        return self
-    # Unary
-    def __invert__(self):
-        return Var(self, "~", D)
-    # With assignment, like +=
-    def __iadd__(self, b):
-        # %% а присваивать тут не надо?!
-        return self + b
-
-class Dummy(Var):
-    def __init__(self):
+        # %% implement, or avoid the whole approach
         pass
-D = Dummy()
-D.name = "None"
 
-class Const(Var):
-    count = 0
-    def __init__(self, c):
-        if c == None:
-            self.name = "None"
-        else:
-            self.name = "const" + str(Const.count)
-            Code.append("const {0} {1} {2} {3}".format(self.name, c, Var.endianness, Var.size))
-            self.value = c
-            Const.count += 1
+class Label():
+    def __init__(self, name):
+        self.name = name
 
-def to_const_maybe(a):
-    if not isinstance(a, Var):
-        a = Const(a)
-    return a
+# операции идут в
 
-# rotate right
-def ror(a, b):
-    return Var(a, "ror", b)
+class Code:
+    code = ''
+    consts = {}
+    @staticmethod
+    def append(string):
+        Code.code += string + '\n'
+    @staticmethod
+    def append_code(code):
+        Code.code += "".join(" ".join(l) + "\n" for l in code)
 
-# rotate left
-def rol(a, b):
-    return Var(a, "rol", b)
+for name in instructions:
+    return_type = instructions[name].return_type
+    arguments = instructions[name].args
+    def gen_func(return_type, name, arguments):
+        # We need a closure. Python has closures to name tables. Hence
+        # the additional level by 'gen_func'.
+        def func(*args):
+            # %% add checking of args
+            # result var
+            r = None
+            if return_type != 'void':
+                r = Var()
+            third = None
+            if name != 'new_const':
+                # () may be used for the generators. But they make
+                # tracebacks harder to read because evaluation is
+                # postponed.
+                # print >> sys.stderr, args
+                a = [new_const1(v) for v in args]
+                # print >> sys.stderr, a
+                a = [v.name for v in a]
+                third = " ".join(a)
+            else:
+                # Константы проваливаются, как есть. Для всего остального
+                # есть имена.
+                third = args[0]
+            third = str(third)
+            if third != '':
+                third = ' ' + third
+            if return_type == 'void':
+                Code.append('{0}{1}'.format(name, third))
+            else:
+                Code.append('{0} {1}{2}'.format(name, r.name, third))
+            return r
+        return func
+    func = gen_func(return_type, name, arguments)
+    if name.startswith('__'):
+        exec('Var.{0} = func'.format(name))
+    else:
+        exec('{0} = func'.format(name))
 
-# to big endian
-def to_be(v):
-    return Var(v, "to_be")
+new_const2 = new_const
+def new_const1(c):
+    if type(c) == int or type(c) == long:
+        if c not in Code.consts:
+            # Если константа ещё не встречалась, именуем её и
+            # запоминаем.
+            Code.consts[c] = new_const2(c)
+        c = Code.consts[c]
+    elif isinstance(c, Var):
+        # not 'type(c) == Var' because type(c) == <type 'instance'>
+        # %% should not we break here?
+        pass
+    elif type(c) == str:
+        # It is for 'labels'. They are wrapped into object with .name .
+        c = Label(c)
+    elif isinstance(c, Label):
+        pass
+    else:
+        raise Exception('error 1: arg is not int or Var: {0} {1}'.format(type(c), c))
+    return c
+new_const = new_const1
 
-class input(Var):
-    count = 0
-    def __init__(self):
-        self.name = "input" + str(input.count)
-        Code.append("declare {0} {1} {2}".format(self.name, Var.endianness, Var.size))
-        input.count += 1
+# +=
+# %% а присваивать тут не надо?!
+Var.__iadd__ = lambda self, b: self + b
 
-# byte string, no endianness, no size
-class input_string(Var):
-    count = 0
-    def __init__(self):
-        self.name = "input_string" + str(input_string.count)
-        Code.append("declare_string {0}".format(self.name))
-        input_string.count += 1
-    def get_ints_with_bit_on_the_end(self, number):
-        vs = [Var() for i in range(number)]
-        # %% update instruction to be like in bitslice
-        # ** string_get_ints implies endianness conversion.
-        Code.append("string_get_ints {0} {1} {2} {3} {4}".format(self.name, Var.endianness, Var.size, number, " ".join(str(v) for v in vs)))
-        return vs
-    def get_bit_length(self):
-        return Var(self, 'bit_length')
+# Algo manipulations
 
-class state(Var):
-    count = 0
-    def __init__(self, default):
-        self.name = "state" + str(state.count)
-        Code.append("declare {0} {1} {2} {3}".format(self.name, default, Var.endianness, Var.size))
-        state.count += 1
+def algo_load(name, args = {}):
+    return B.get_code_full(name, False, False, args)
 
-def output(a):
-    Code.append("output " + a.name)
+def algo_get_block_int_count(code):
+    k = 0
+    for l in code:
+        if l[0] == 'input':
+            k += 1
+    return k
 
-def my_const_array(name, arr):
-    return MyArray(name, [Const(v) for v in arr])
+# %% cache results?
+def algo_get_initial_state(code):
+    state = []
+    for l in code:
+        if l[0] == 'new_state_var':
+            state.append(l[2])
+    # Определения констант вынесены в отдельные инструкции
+    for l in code:
+        # %% use hash
+        if l[0] == 'new_const' and l[1] in state:
+            Code.append_code([l])
+    return state
 
-class MyArray(object):
-    # %% make arrays writable
-    def __init__(self, name, arr):
-        self.name = "array_" + name
-        Code.append("array {0} {1}".format(self.name, " ".join(str(v) for v in arr)))
-    def __getitem__(self, i):
-        # %% regular num index
-        if not isinstance(i, CycleVar):
-            raise ValueError("index is not cycle var")
-        return Var(self, "getitem", i)
+def algo_insert(code, *args):
+    block_count = algo_get_block_int_count(code)
+    block = args[0:block_count]
+    state = args[block_count:]
+    # %% тут надо будет не вставлять инициализацию состояния
+    # итак, вставка кода: у нас есть инструкции кода, список
+    # переменных блока, список переменных состояния, а вернуть мы
+    # должны список переменных-выходов
+    #
+    # составляем таблицы замен входов и состояний, а так же список выходов
+    outputs = []
+    substs = {}
+    b = list(block)
+    s = list(state)
+    for l in code:
+        if l[0] == 'new_state_var':
+            substs[l[1]] = s.pop(0)
+            l[0] = B.drop
+        if l[0] == 'input':
+            substs[l[1]] = b.pop(0)
+            l[0] = B.drop
+        if l[0] == 'output':
+            outputs.append(l[1])
+            l[0] = B.drop
+    code = B.clean(code)
+    # заменяем имена в коде
+    # %% надо бы делать глубокую копию
+    for l in code:
+        for i in range(1, len(l)):
+            if l[i] in substs:
+                # %% We don't accept bear constants here.
+                l[i] = substs[l[i]].name
+    # добавляем код в общий
+    Code.append_code(code)
+    return outputs
 
-class CycleVar(object):
-    # %% CycleVar is limited to cycle_const_range
-    count = 0
-    def __init__(self, cycle_name, min, max, step):
-        self.name = "cyclevar" + str(CycleVar.count)
-        Code.append("cycle_const_range {0} {1} {2} {3} {4}".format(self.name, cycle_name, min, max, step))
-        CycleVar.count += 1
-
-def cycle_const_range(name, min, max, step):
-    # min and max are inclusive (unlike in python's range)
-    return CycleVar(name, min, max, step)
-
-def cycle_end(name):
-    # %% check parity
-    Code.append("cycle_end " + name)
-
-def comment(text, *args):
-    # %% check for new lines
-    Code.append("comment " + text.format(*args))
-
-def debug_print_var(var, comment):
-    # %% print number of bits?
-    # DEF %%
-    Code.append("debug_print_var {0} {1}".format(var.name, comment))
-
-code = sys.stdin.read()
-exec(code)
-for i in Code:
-    print i
+if __name__ == "__main__":
+    code = sys.stdin.read()
+    # print >> sys.stderr, ">>>>", code, "<<<<"
+    exec(code)
+    print Code.code
