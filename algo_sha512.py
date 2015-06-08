@@ -1,7 +1,14 @@
 # abstract SHA512
 # http://en.wikipedia.org/wiki/SHA512
 
+# Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted.
+
 Var.setup('be', 8)
+
+# key = input_key()
 
 w = make_array('w', 80)
 
@@ -9,9 +16,14 @@ w = make_array('w', 80)
 
 # Getting in
 for i in range(0, 16):
+    print_verbatim(">1> " + str(i))
     t = input()
+    # t = get_from_key_0x80_padding_length(key)
+    # print_verbatim(">2> " + str(i))
     set_item(w, i, t)
-    # print_var(t)
+    # print_verbatim(">3> " + str(i))
+    print_var(t)
+    # print_verbatim(">4> " + str(i))
     # print_var(w[i])
 
 # comment('input: {0}', " ".join(str(v) for v in w[0:16]))
@@ -154,6 +166,9 @@ H[7] += h
 label('before_outputs')
 
 # Getting out
-for v in H:
-    # print_var(v)
+for i, v in enumerate(H):
+    print_verbatim(">out>1> " + str(i))
+    v = swap_to_be(v)
+    print_var(v)
     output(v)
+    # print_verbatim(">out>2> " + str(i))

@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
 # библиотека для работы с "байткодом"
 
+# Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted.
+
 # %% clean imports
 import sys
 import os
 import re
 import pickle
+
+import random
+# RNG = random.SystemRandom()
 
 from lang_spec import instructions
 
@@ -14,6 +22,8 @@ try:
     from shlex import quote
 except ImportError:
     from pipes import quote
+
+global_vars = {}
 
 def get_code(name, use_tracer, use_bitslice, args={}):
     # %% needs a patched trace.py that outputs to stderr, may bypass
@@ -98,6 +108,8 @@ def join_parts(a, b):
 def dump(code, filename):
     with file(filename, 'w') as f:
         for i in code:
+            # Мы всё приводим к строкам
+            # %% хорошо бы проверять, что мы получили строку или число
             f.write(" ".join(i))
             f.write("\n")
     return code
@@ -113,6 +125,8 @@ new_array
 #input_salt
 output
 input
+check_output
+get_from_key_0x80_padding_length
 
 __add__
 __sub__
@@ -173,6 +187,9 @@ make_array
 print_buf
 print_var
 print_digest
+
+swap_to_be
+
 '''
 
 to_vector = {}
@@ -196,6 +213,24 @@ def collect_tree(code):
         else:
             r[l[1]] = [l]
     return r
+
+# функция, вычисляющая константные выражения
+def compute_const_expressions(code):
+    consts = {}
+    for l in code:
+        if l[0] == 'new_const':
+            consts[l[1]] = l[2]
+    # %% вообще, это можно было бы делать в один проход
+    new_code = []
+    for l in code:
+        if l[0] == '__sub__' and l[2] in consts and l[3] in consts:
+            l[0] = 'new_const'
+            l[2] = str(int(consts[l[2]]) - int(consts[l[3]]))
+            del l[3]
+            new_code.append(l)
+        else:
+            new_code.append(l)
+    return new_code
 
 def vectorize(code):
     # не все константы надо векторизовывать, размеры битовых
@@ -310,7 +345,9 @@ def unroll_cycle_const_range_partly(code, label, unroll_size):
     # Изменяем шаг цикла
     # %% тут вообще-то надо константу делать, а не записывать её
     #  % напрямую в инструкцию
-    body[0][5] = str(int(consts[body[0][5]]) * unroll_size)
+    nn = new_name()
+    new_body.append(['new_const', nn, str(int(consts[body[0][5]]) * unroll_size)])
+    body[0][5] = nn
     new_body.append(body[0])
     # Конструируем новое тело.
     # Выполняем проходим по циклу заданное количество раз
@@ -431,9 +468,9 @@ def unpack_const_subscripts(code, arrays = None):
     for l in code:
         if l[0] == 'new_const':
             const_defs[l[1]] = l[2]
-        if l[0] == 'v_new_array':
+        if l[0] in ['v_new_array', 'new_array']:
             array_defs[l[1]] = l
-        if l[0] == 'v_make_array':
+        if l[0] in ['v_make_array', 'make_array']:
             array_defs[l[1]] = l
     rs = {}
     for l in code:
@@ -442,7 +479,7 @@ def unpack_const_subscripts(code, arrays = None):
         # Добавляем новые замены по операции взятия индекса
         # if l[0] == 'v___getitem__' and l[2] == 'sha512_var1':
         #     print >> sys.stderr, l, arrays, array_defs
-        if l[0] == 'v___getitem__' and l[3] in const_defs and (not arrays or array_defs[l[2]][2] in arrays):
+        if l[0] in ['v___getitem__', '__getitem__'] and l[3] in const_defs and (not arrays or array_defs[l[2]][2] in arrays):
             old = l[1]
             # Берём элемент из массива
             # %% надо бы проверять, что индекс не отрицательный
@@ -490,6 +527,27 @@ def remove_assignments(code):
             l[0] = drop
     return clean(code)
 
+def deep_copy(code):
+    return list(list(l) for l in code)
+
+# функция замены всех частей на строки
+def alltostr(code):
+    r = code
+    packs = [code]
+    if type(code) == dict:
+        packs = code.values()
+    # Заменяем на месте
+    for p in packs:
+        # deep copy each pack (code object)
+        p = deep_copy(p)
+        for l in p:
+            # print >> sys.stderr, l
+            for i in range(len(l)):
+                # %% нужна проверка, что там только числа и строки
+                l[i] = str(l[i])
+            # print >> sys.stderr, l
+    return r
+
 # It's like -> in clojure and dash.el. It is not as elegant as macro
 # in lisp but is fine too. Example of usage:
 # B.thread_first(
@@ -500,12 +558,49 @@ def remove_assignments(code):
 #     [ B.dump, 'all.bytecode' ],
 #     [ O.gen, c_code, args ]
 # )
+# Though there is thread_code for code passes. This function is for
+# simpler usages.
 def thread_first(what, *forms):
     for f in forms:
         if type(f) != list and type(f) != tuple:
             f = (f,)
+        print >> sys.stderr, f[0]
         what = f[0](what, *f[1:])
+        # После каждого прохода заменяем всё на строки
+        # %% Это такой глобальный костыль, чтобы можно сохранять числа
+        #  % в массив
+        # %% Это должно быть медленно
+        what = alltostr(what)
     return what
+
+# Like thread_first but handles parallel branches
+# If a function returns a list then the list is passed to next
+# function.
+# If a function returns a dictionary then
+#   If next "function" is a list or a bare function then
+#     we pass all values through it and collect the dictionary again
+#   If next "function" is tuple then the first element is a key to
+#       select the value to process through that function
+# %% а что если мы пропускаем словарь, а функция вернула новый
+#  % словарь, мы можем совмещать, а можем вкладывать
+def thread_code(what, *forms):
+    res = what
+    for f in forms:
+        # Если не список и не кортеж, то это bare function,
+        # оборачиваем в список.
+        if type(f) != list and type(f) != tuple:
+            f = [f,]
+        print >> sys.stderr, f[0]
+        # После каждого прохода заменяем всё на строки
+        # %% Это такой глобальный костыль, чтобы можно сохранять числа
+        #  % в массив
+        # %% Это должно быть медленно
+        res = deep_copy(res)
+        res = f[0](res, *f[1:])
+        res = alltostr(res)
+        # Если получили словарь и наш словарь - словарь по
+        # умолчанию, то мы замещаем словарь на новый.
+    return res
 
 def use_define_for_some(code):
     # Все инструкции, результат которых используется один раз,
@@ -662,11 +757,11 @@ def replace_state_with_const(code):
     return clean(code)
 
 def interleave(code, number):
+    assert type(number) == int
     # assert number > 1
     assert number >= 1
     if number == 1:
         return code
-    assert type(number) == int
     # Мы размножаем все инструкции, кроме циклов (ну и управления
     # использованием define'ов). При этом содержимое циклов может
     # перемешиваться, а может и не перемешиваться. Операции вне циклов
@@ -695,13 +790,22 @@ def interleave(code, number):
             #  % used)
             for n in l[2:]:
                 to_save[n] = 1
-        if instructions[l[0]].return_type != 'void' and l[1] in to_save:
+        if instructions[l[0]].return_type != 'void' and l[1] in to_save or l[0] in ['v_new_array', 'print_verbatim']:
+            if l[0] in ['v_new_array', 'print_verbatim']:
+                to_save[l[1]] = 1
+            # %% v_new_array пока что только для констант, поэтому его
+            #  % мы не размножаем
             saved_code.append(l)
             for i in range(number):
                 rss[i][l[1]] = l[1]
             for n in l[2:]:
                 to_save[n] = 1
     saved_code = list(reversed(saved_code))
+    # Добавляем константу 1
+    one = new_const(1)
+    new_code.append(one)
+    one = one[1]
+    # Добавляем код определения констант для сдвигов и размера интерлива
     offsets = [new_const(i) for i in range(number)]
     Nl = new_const(number)
     N = Nl[1]
@@ -711,7 +815,7 @@ def interleave(code, number):
         # print >> sys.stderr, '>>', l
         if l in saved_code:
             new_code.append(l)
-            print >> sys.stderr, l
+            # print >> sys.stderr, l
             # print >> sys.stderr, ' <-  same'
         elif l[0] in ['cycle_const_range', 'use_define', 'label', 'cycle_end']:
             new_code.append(l)
@@ -745,13 +849,19 @@ def interleave(code, number):
                     # %% а что если есть несколько массивов?
                     # Если у нас берётся элемент, то индекс должен
                     # быть не idx, а  idx * N + i  .
+                    # Индексы не меняют для вектора констант.
+                    array_name = l[2] if l[0] == 'v___getitem__' else l[1]
                     idx = l[3] if l[0] == 'v___getitem__' else l[2]
                     m = new_name()
                     s = new_name()
                     # %% можно не копировать описание индекса
-                    new_code.append(['__mul__', m, rss[i][idx], N])
+                    # new_code.append(['__mul__', m, rss[i][idx], N])
+                    # Если массив констант, то индексы умножаются на 1
+                    # и не сдвигаются
+                    # %% сие корявенько
+                    new_code.append(['__mul__', m, rss[i][idx], one if array_name in to_save else N])
                     # new_code.append(['__add__', s, m, offsets[i]])
-                    if i > 0:
+                    if i > 0 and array_name not in to_save:
                         new_code.append(['__add__', s, m, offsets[i]])
                     else:
                         # Для нулевого "треда" итоговый результат - сумма.
@@ -841,3 +951,604 @@ def short_circuit_getitem_after_set_item(code):
     #  % начало можно было бы
     # %% implement
     return code
+
+def replace_new_array(code):
+    # Заменяем new_array на make_array и присваивания.
+    new_code = []
+    for l in code:
+        if l[0] == 'new_array':
+            # new_array(array_name, label, element1, element2, ...)
+            name = l[1]
+            label = l[2]
+            elements = l[3:]
+            # Записываем длину массива
+            len_name = new_name()
+            new_code.append(['new_const', len_name, len(elements)])
+            # Создаём массив
+            new_code.append(['make_array', name, label, len_name])
+            # Присваиваем элементы
+            for i, j in enumerate(elements):
+                # Создаём константу индекса
+                n = new_name()
+                new_code.append(['new_const', n, i])
+                # Присваиваем элемент
+                new_code.append(['set_item', name, n, j])
+        else:
+            new_code.append(l)
+    return new_code
+
+def bitslice(code, bs_bits, size):
+    # %% надо бы сделать поддержку new_array, чтобы не раскрывать
+    code = replace_new_array(code)
+    # for l in code
+    #     if l[0] == 'new_array':
+    #         raise Exception('new_array should be expanded')
+    # проходим по коду и заменяем часть операций на новые; ведём
+    # таблицу имён: имя -> вектор битов
+    bits = 8 * size
+    new_code = []
+    names = {}
+    consts = {}
+    # Создаём константы для 0 и 1
+    bs_zero = new_name()
+    new_code.append(["bs_new_const", bs_zero, 0])
+    bs_one = new_name()
+    new_code.append(["bs_new_const", bs_one, 1])
+    # Проходим код, чтобы записать константы, которые не надо
+    # битслайсить. В этом плане, битслайс очень похож на векторизацию.
+    # не все константы надо векторизовывать, размеры битовых
+    # сдвигов/ротейтов не надо
+    # %% надо бы проверять, что константы не используются в разных
+    #  % местах и разделять на векторную и скалярную
+    # %% Copy-pasting is evil! Copied from vectorize()
+    no_vec = {}
+    array_vars = {}
+    for l in code:
+        if l[0] == 'cycle_const_range':
+            array_vars[l[1]] = 1
+            # %% это наверное надо и в vectorize добавить
+            no_vec[l[3]] = 1
+            no_vec[l[4]] = 1
+            no_vec[l[5]] = 1
+        if l[0] in ['ror', 'rol', '__rshift__', '__lshift__', '__getitem__', 'make_array']:# or (l[0].startswith('cycle_') and l[0] != 'cycle_end'):
+            no_vec[l[3]] = 1
+        if l[0] in ['set_item']:
+            no_vec[l[2]] = 1
+        if l[0] == '__sub__' and l[2] in array_vars:
+            # %% очередной костыль...
+            # %% эта проверка копируется для самой операции вычитания
+            # %% любой аргумент, а не только левый
+            # Проверяем, что левый аргумент является переменной цикла.
+            # Тогда не векторизуем константу, которая вычитается.
+            no_vec[l[3]] = 1
+        # if l[0] not in to_vector:
+        #     for i in l[1:]:
+        #         no_vec[i] = 1
+        if l[0] == 'make_array':
+            # Размер массива
+            no_vec[l[2]] = 1
+    # Собираем константы
+    for l in code:
+        if l[0] == 'new_const':
+            consts[l[1]] = l[2]
+    # Обрабатываем код
+    for l in code:
+        # %% надо сделать различную генерации в зависимости от размера
+        #  % выходных векторов
+        if l[1] in no_vec:
+            # Пропускаем не векторизуемые вещи
+            new_code.append(l)
+            continue
+        if l[0] == 'make_array':
+            new_code.append(["bs_" + l[0]] + l[1:])
+        elif l[0] == '__getitem__':
+            v = []
+            for i in range(bits):
+                n = new_name()
+                v.append(n)
+                # Взятие элемента из массива теперь ещё несёт бит
+                new_code.append(["bs_getitem", n, l[2], l[3], i])
+            names[l[1]] = v
+        elif l[0] == 'set_item':
+            # set_item(array, idx, value)
+            # bs_set_item(array, idx, value, bit)
+            for i, j in zip(range(bits), names[l[3]]):
+                new_code.append(['bs_set_item', l[1], l[2], j, i])
+        elif l[0] == 'new_var':
+            v = []
+            for i in range(bits):
+                n = new_name()
+                v.append(n)
+                new_code.append(['bs_new_var', n])
+            names[l[1]] = v
+        elif l[0] in ['print_var', 'output']:
+            for i, j in enumerate(names[l[1]]):
+                new_code.append(['bs_' + l[0], j, i])
+        elif l[0] == 'input':
+            v = []
+            for i in range(bits):
+                n = new_name()
+                v.append(n)
+                new_code.append(['bs_input', n, i])
+            names[l[1]] = v
+        elif l[0] in ['__xor__', '__or__', '__and__']:
+            op = 'bs_' + l[0].replace('_', '')
+            # для аргументов берём пары из векторов, для каждой пары
+            # делаем новую операцию, вектор новых имён запоминаем
+            v = []
+            for i, j in zip(names[l[2]], names[l[3]]):
+                n = new_name()
+                v.append(n)
+                new_code.append([op, n, i, j])
+            names[l[1]] = v
+        elif l[0] == '__invert__':
+            # %% copy-pasting is evil! тут можно было подсократить,
+            #  % потому что скопирован код
+            op = 'bs_' + l[0].replace('_', '')
+            v = []
+            for i in names[l[2]]:
+                n = new_name()
+                v.append(n)
+                new_code.append([op, n, i])
+            names[l[1]] = v
+        elif l[0] == '__getitem__':
+            # __getitem__(name, array, idx)
+            # bs_getitem(name, array, idx, bit)
+            # Подобно другим операциям, но при взятии элемента, ещё
+            # номер бита указывается.
+            # %% В некоторых хешах всё-таки нужно делать битовые
+            #  % индексы (например, в sunmd5 на этапе coin flip). Там
+            #  % они не константы, операция при этом должна быть другой.
+            op = 'bs_' + l[0].replace('_', '')
+            v = []
+            for i in range(bits):
+                n = new_name()
+                v.append(t)
+                new_code.append([op, n, l[2], l[3], i])
+            names[l[1]] = v
+        elif l[0] == '__add__':
+            # op = lambda *args: new_code.append('bs_{2} {0} {1} {3}'.format(*args))
+            op = lambda r, a, op, b: new_code.append(['bs_' + op, r, a, b])
+            a = names[l[2]]
+            b = names[l[3]]
+            # создаём все имена впрок
+            # (возможно, есть лишние, это не страшно)
+            r, n, x, q, w = [[new_name() for j in range(i)]
+                            for i in [bits] * 5]
+            # r - result bit
+            # n - carry bit
+            for i in reversed(range(bs_bits)):
+                if i == bs_bits - 1:
+                    op(r[i], a[i], 'xor', b[i])
+                    op(n[i], a[i], 'and', b[i])
+                else:
+                    op(x[i], a[i], 'xor', b[i])
+                    op(r[i], x[i], 'xor', n[i + 1])
+                    # %% Better circuit here.
+                    # n[i] = b[i] ^ (x[i] & (b[i] ^ n[i + 1]))
+                    op(w[i], b[i], 'xor', n[i + 1])
+                    op(q[i], x[i], 'and', w[i])
+                    op(n[i], b[i], 'xor', q[i])
+            names[l[1]] = r
+        elif l[0] == '__floordiv__':
+            # assignment
+            # %% rotate has problems overriding values: a = rol(a, 1)
+            #  % is broken; maybe temp vars can solve that
+            #  % (предположительно, компилятор уберёт ненужные)
+            # Для всех пар битов, присваиваем правый в левый.
+            for i, j in zip(names[l[1]], names[l[2]]):
+                new_code.append(['bs_assign', i, j])
+        elif l[0] == 'new_const':
+            # Режем константу на биты и запоминаем в виде вектора
+            # битов.
+            c = int(l[2])
+            # ** Биты идут со старших: старшие биты - в начале вектора,
+            #  * младшие - в конце. Начало вектора - слева, конец -
+            #  * справа. Соответствует битовым сдвигам.
+            names[l[1]] = [bs_one if c & (1 << i) else bs_zero for i in range(bs_bits - 1, -1, -1)]
+        elif l[0] == '__rshift__':
+            # We just manipulated names.
+            # У нас 3 аргумента: результат, переменная, сдвиг.
+            # В таблицу имён мы присваиваем сдвинутый вектор,
+            # дополненный нулями, нужны нули. Операции при этом не
+            # получается.
+            s = int(consts[l[3]])
+            names[l[1]] = [bs_zero] * s + names[l[2]][: bits - s]
+        elif l[0] == 'ror':
+            # Как сдвиг, только мы не дополняем нулями, а берём другой
+            # кусок.
+            s = int(consts[l[3]])
+            names[l[1]] = names[l[2]][bits - s :] + names[l[2]][: bits - s]
+        else:
+            # operation that should not be bitsliced, pass as is
+            new_code.append(l)
+    return new_code
+
+# Функция для исследования возможности реверса
+# Показывает номер лучшего выхода для первичной проверки и выходит.
+# %% случай одного выхода не сработает для битслайса, было бы
+#  % интересно посмотреть, нельзя реверсить битслайс не до 1 инта, к
+#  % тому же нам не все биты нужны, проверки в crypt_all можно
+#  % растянуть и делать постепенно
+# %% need to unroll all loops, B.remove_assignments,
+#  % B.unpack_const_subscripts before the research
+def research_reverse(code):
+    new_code = []
+    reverse_code = []
+    # Идём с конца от выходов по операциям для реверса: swap_to_be
+    # выпадает в swap_to_le, а + и ^ реверсятся, только если у нас
+    # один из аргументов - константа, но ассоциативность играет роль:
+    # r = (a ^ b) ^ C - константа сверху, мы реверсим
+    # r = a ^ (b ^ C) - константа не сверху, мы не видим возможность
+    # реверса; надо привести к первому случаю, либо заглядывать
+    # глубже.
+    # %% обрабатывать ассоциативность
+    # %% обрабатывать реверс
+    # %% изменение порядка операций может бить по производительности
+    # %% для outputs можно было бы использовать множество, а не словарь
+    outputs = {}
+    reverse_inputs = []
+    reverse_outputs = []
+    # Записываем константы
+    consts = {}
+    for l in code:
+        if l[0] == 'new_const':
+            consts[l[1]] = l[2]
+    # Для каждого выхода находим инструкцию, дальше которой не
+    # реверсится
+    # %% тут можно сразу собрать инструкции для реверса в отдельные
+    #  % массивы по выходам
+    connections = {}
+    for l in reversed(code):
+        if l[0] == 'output':
+            outputs[l[1]] = 1
+            # print >> sys.stderr, 'same', l[1]
+            connections[l[1]] = l[1]
+        if l[0] == 'swap_to_be' and l[1] in outputs:
+            # Если операция - swap_to_be и её результат - выход
+            # алгоритма, то мы обращаем операцию, а её аргумент
+            # считаем новым выходом алгоритма
+            old_output = l[1]
+            new_output = l[2]
+            # print >> sys.stderr, new_output, old_output
+            connections[new_output] = connections[old_output]
+            del connections[old_output]
+            del outputs[old_output]
+            outputs[new_output] = 1
+        if l[0] in ['__xor__', '__add__'] and l[1] in outputs and (l[2] in consts or l[3] in consts):
+            # Если операция - сложение (битовое ^ или численное +),
+            # один из аргументов - константа, а результат - выход, то
+            # мы обращаем операцию. Не константный аргумент становится
+            # новым выходом.
+            old_output = l[1]
+            # %% если оба константы, мы не оптимизировали
+            #  % константные подвыражения, это надо было сделать
+            #  % раньше; пока что просто ломаемся
+            if l[2] in consts and l[3] in consts:
+                raise Exception('+/^ with 2 consts')
+            if l[2] in consts:
+                const = l[2]
+                new_output = l[3]
+            else:
+                const = l[3]
+                new_output = l[2]
+            # print >> sys.stderr, new_output, old_output
+            connections[new_output] = connections[old_output]
+            del connections[old_output]
+            del outputs[old_output]
+            outputs[new_output] = 1
+        # %% сделать проверку, что выход - результат, а операция не
+        #  % реверсится, тогда удалять выход из множества выходов
+        if l[0] == 'cycle_end':
+            # %% мы всегда должны разворачивать; операции в цикле не
+            #  % могут быть реверсены
+            raise Exception('cycle_end reversing ops')
+    # Считаем размеры зависимостей для каждого из выходов
+    sizes = {}
+    for o in outputs:
+        count = 0
+        is_needed = { o: 1 }
+        for l in reversed(code):
+            # %% тут не считают операции с побочными эффектами, так
+            #  % что результат - лишь оценка
+            if instructions[l[0]].return_type != 'void' and l[1] in is_needed:
+                # Записываем аргументы в множество нужных нам
+                for i in l[2:]:
+                    is_needed[i] = 1
+            # Все инструкции проверяем на использование нужных
+            # элементов; такие инструкции не могут быть отброшены.
+            for i in l[1:]:
+                if i in is_needed:
+                    # Считаем инструкцию в количество нужных
+                    count += 1
+                    break
+        sizes[o] = count
+        # print >> sys.stderr, is_needed
+    # Находим ближайший выход
+    m = len(code)
+    mo = None
+    for o in sizes:
+        # Exactly <= (not <) because there may be full length: no
+        # reverse at all and only 1 output, we pick that output
+        if sizes[o] <= m:
+            m = sizes[o]
+            mo = o
+    assert mo != None
+    # Находим номер выхода по оригинальному коду
+    output = connections[mo]
+    # Собираем выходы
+    onums = []
+    for l in code:
+        if l[0] == 'output':
+            onums.append(l[1])
+    back_connections = {}
+    for i in connections:
+        if i != connections[i]:
+            back_connections[connections[i]] = i
+    # %% при равном размере мы хотели бы выбирать выход с меньшим
+    #  % размеров реверса
+    # print >> sys.stderr, connections
+    # print >> sys.stderr, back_connections
+    # print >> sys.stderr, sizes
+    # print >> sys.stderr, onums
+    for i, o in enumerate(onums):
+        print >> sys.stderr, "#{0} output {1} has size {2}".format(i, o, sizes[back_connections[o]])
+    print >> sys.stderr, "Result: use output #{0} ({1} connected to {2}) size = {3}".format(onums.index(output), output, mo, m)
+    # выводим все выходы по порядку
+    print >> sys.stderr, "All size:", sizes
+    raise Exception('exited; end of execution, use the result above')
+
+# Функция для возврата пустого кода для реверса операций
+# Возвращает: словарь {
+#   'code': основной код,
+#   'reverse': обратный код для обработки хеша.
+# }
+def no_reverse(code, output_number):
+    reverse_code = [
+        ['input', 'r1'],
+        ['output', 'r1']]
+    # Записываем выходы
+    outputs_array = []
+    for l in code:
+        if l[0] == 'output':
+            outputs_array.append(l[1])
+    code.append(['check_output', outputs_array[output_number]])
+    return { 'code': code, 'reverse': reverse_code }
+
+# Функция для реверса операций (+, ^, swap_to_be)
+# Реверсит только 1 инт, на него ставит check_output инструкцию,
+# все выходы сохраняются, для binary() возвращается код для реверса
+# одного инта
+# Получает: код, номер выхода для реверса.
+# Возвращает: словарь {
+#   'code': основной код,
+#   'reverse': обратный код для обработки хеша.
+# }
+# %% по структуре полностью копируем research_reverse
+# %% ещё ротейты должны реверситься
+def reverse_ops(code, output_number):
+    reverse_code = []
+    # Записываем константы
+    consts = {}
+    for l in code:
+        if l[0] == 'new_const':
+            consts[l[1]] = l
+    # Записываем выходы
+    outputs_array = []
+    for l in code:
+        if l[0] == 'output':
+            outputs_array.append(l[1])
+    output_to_reverse = outputs_array[output_number]
+    # Мы нашли название выхода для реверса, теперь откатываем операции
+    outputs = { output_to_reverse: 1 }
+    # Вставляем операцию входа в алгоритм реверса
+    reverse_code.append(['input', output_to_reverse])
+    last_idx = None
+    last_output = None
+    for op_idx, l in reversed(list(enumerate(code))):
+        if l[0] == 'swap_to_be' and l[1] in outputs:
+            # Если операция swap_to_be и её результат - выход
+            # алгоритма, то мы обращаем операцию, а её аргумент
+            # считаем новым выходом алгоритма
+            old_output = l[1]
+            new_output = l[2]
+            del outputs[old_output]
+            outputs[new_output] = 1
+            # Запоминаем обратную операцию
+            reverse_code.append(['swap_to_le', l[2], l[1]])
+            last_idx = op_idx
+            last_output = new_output
+        if l[0] in ['__xor__', '__add__'] and l[1] in outputs and (l[2] in consts or l[3] in consts):
+            # Если операция - сложение (битовое ^ или численное +),
+            # один из аргументов - константа, а результат - выход, то
+            # мы обращаем операцию. Не константный аргумент становится
+            # новым выходом.
+            old_output = l[1]
+            # %% если оба константы, мы не оптимизировали
+            #  % константные подвыражения, это надо было сделать
+            #  % раньше; пока что просто ломаемся
+            if l[2] in consts and l[3] in consts:
+                raise Exception('+/^ with 2 consts')
+            if l[2] in consts:
+                const = l[2]
+                new_output = l[3]
+            else:
+                const = l[3]
+                new_output = l[2]
+            del outputs[old_output]
+            outputs[new_output] = 1
+            # Запоминаем обратную операцию
+            # %% хорошо бы операцию определения константы тоже взять,
+            #  % правда, имя надо заменить; если выводить в один файл,
+            #  % то надо все константы выносить в начало файла
+            reverse_code.append([
+                '__sub__' if l[0] == '__add__' else '__xor__',
+                new_output,
+                old_output,
+                const
+                ])
+            last_idx = op_idx
+            last_output = new_output
+        # %% сделать проверку, что выход - результат, а операция не
+        #  % реверсится, тогда удалять выход из множества выходов
+        if l[0] == 'cycle_end':
+            # %% мы всегда должны разворачивать; операции в цикле не
+            #  % могут быть реверсены
+            # %% пока что не крашимся, но надо вручную проверять, что
+            #  % в нужном месте реверсимся
+            pass
+            # raise Exception('cycle_end reversing ops')
+    assert last_idx != None
+    assert last_output != None
+    # Копируем инструкции описания констант в код обращения
+    const_code = []
+    for l in reverse_code:
+        for i in l:
+            if i in consts:
+                const_code.append(consts[i])
+    reverse_code = const_code + reverse_code
+    # В основной код вставляем инструкцию check_output - она будет
+    # отмечать реверсенный выход.
+    # %% убрать старый выход?
+    code.insert(last_idx + 1, ['check_output', last_output])
+    # Вставляем операцию выхода из алгоритма реверса: выход - это
+    # результат последней операции
+    reverse_code.append(['output', reverse_code[-1][1]])
+    return { 'code': code, 'reverse': reverse_code }
+
+# Функция для откладывания операций, которые не нужны для быстро
+# проверки результатов
+# Возвращает: словарь {
+#   'code': основной код,
+#   'postponed': отложенный код
+# }
+# %% а этого достаточно? или нам надо больше код возвращать, чтобы
+#  % иметь управление над порядком данных в binary? думаю, нам нужен
+#  % код для binary, а может, и других методов...
+def postpone_part(code):
+    new_code = []
+    postponed_code = []
+    # %%%
+    return { 'code': new_code, 'postponed': postponed_code }
+
+# Реверс операций и откладывание того, что не нужно для минимальной
+# проверки
+# Возвращает: словарь {
+#   'code': основной код,
+#   'postponed': код доведения до минимальной проверки,
+#   'reverse': обратный код для обработки хеша.
+# }
+def reverse_ops_and_postpone(code):
+    # Обращаем операции
+    t = reverse_ops(code)
+    # Отделяем часть, которая не нужна для сравнения
+    t2 = postpone_part(t['code'])
+    t2['reverse'] = t['reverse']
+    return t2
+
+# Функция для введение повторного использования переменных, чтобы не
+# использовать кучу временных переменных: добавляем вначале несколько
+# свободных переменных, в них присваиваем результаты, всё остальное
+# оборачиваем, как use_define_for_some; по сути мы вообще всё
+# оборачиваем так, но у нас появятся присваивания
+def reuse_variables(code):
+    new_code = []
+    # Проходим по коду и записываем положения использования переменных
+    used_at = {}
+    for i, l in enumerate(code):
+        for n in l[1:]:
+            used_at[n] = i
+    # Считаем количество обращений для имён
+    counts = {}
+    for l in code:
+        # Перебираем все имена, включая результаты, так что
+        # интересующие нас встречаются дважды: при присваивании и при
+        # 1 использовании.
+        # Метки мы не пропускаем, потому что они не будут в качестве
+        # целевого имени. То есть мы их посчитаем, но не будем проверять.
+        for n in l[1:]:
+            if n not in counts:
+                counts[n] = 0
+            counts[n] += 1
+    # Проходим по коду и составляем список переменных
+    # variables = [0] * 20
+    variables = []
+    substs = {}
+    #  and counts[l[1]] != 2
+    check = lambda l: instructions[l[0]].return_type != 'void' and l[0] not in ['new_const', 'input']
+    check2 = lambda l, i: check(l) # and (counts[l[1]] != 2)
+    for i, l in enumerate(code):
+        # Если операция имеет результат и используется несколько раз,
+        # то она записывается в переменную
+        # if check(l):
+        if check2(l, i):
+            # Мы хотим записать результат в переменную: если у нас
+            # есть свободная переменная, то в неё, иначе создаём новую
+            # переменную.
+            vv = list(enumerate(variables))
+            # random.shuffle(vv)
+            # vv = reversed(vv)
+            # Ищем свободную переменную:
+            for j, v in vv:
+                # Если оригинальная переменная, связанная с этой
+                # позицией уже не используется, то мы запоминаем в эту
+                # позицию новую переменную. Иначе создаём новую
+                # позицию.
+                if v == 0 or used_at[v] <= i:
+                    variables[j] = l[1]
+                    substs[l[1]] = j
+                    break
+            else:
+                substs[l[1]] = len(variables)
+                variables.append(l[1])
+    # print >> sys.stderr, variables, substs
+    # У нас есть массив variables, по его длине нам нужно сделать
+    # переменные; после этого мы заменим старые имена на новые по
+    # словарю substs.
+    for i in range(len(variables)):
+        v = new_name()
+        new_code.append(['new_var', v])
+        variables[i] = v
+    new_code.append(['use_define', 'yes'])
+    for j, l in enumerate(code):
+        l2 = list(l)
+        used = check2(l, j)
+        for i in range(2 if used else 1, len(l2)):
+            # заменяем чтения оригинальных переменных на обращения к
+            # новым переменным
+            if l[i] in substs:
+                l2[i] = variables[substs[l[i]]]
+        new_code.append(l2)
+        if used:
+            # вставляем присваивание
+            new_code.append(['__floordiv__', variables[substs[l[1]]], l[1]])
+    new_code.append(['use_define', 'no'])
+    return new_code
+
+# Remove all print instructions
+def drop_print(code):
+    # %% more instructions
+    return [l for l in code if l[0] not in
+            ['print_var', 'v_print_var', 'bs_print_var', 'print_verbatim']]
+
+def override_state(code, state):
+    consts = {}
+    for l in code:
+        if l[0] == 'new_const':
+            consts[l[1]] = l
+        if l[0] == 'new_state_var':
+            consts[l[2]][2] = str(state.pop(0))
+    return code
+
+def drop_last_output(code):
+    outputs = 0
+    for l in code:
+        if l[0] == 'output':
+            outputs += 1
+    k = 0
+    for l in code:
+        if l[0] == 'output':
+            k += 1
+            if outputs == k:
+                l[0] = drop
+    return clean(code)

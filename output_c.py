@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 # библиотека для вывода кода в скалярный си
-# в отдельный файл или в формат джона
+# в отдельный файл или в формат для джона
+
+# Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted.
 
 # аргументы сгенерированного бинарника: key salt rounds
 
 import sys
+
+import re
 
 from string import Template
 from bytecode_main import drop, clean
@@ -13,18 +20,29 @@ import bytecode_main as B
 # import output_c as O
 
 size_type = {
-    # 8: 'unsigned long long',
-    8: 'int',
+    # %% generate asserts to enforce assumptions, or use uint64_t and similar
+    8: 'unsigned long long',
+    # 8: 'int',
     4: 'unsigned int'
 }
 size_format_x = {
     8: '%016llx',
     4: '%08x'
 }
+size_format_u = {
+    8: '%016llu',
+    4: '%08u'
+}
 size_suffix = {
     8: 'ULL',
     4: 'U'
 }
+
+# %% __m128i and other types
+bs_size_type = {
+    64: 'unsigned long long'
+}
+
 
 def not_implemented():
     raise Exception('not implemented')
@@ -35,14 +53,37 @@ def bad_instruction():
 class Global:
     c_output = None
     def __init__(self):
+        self.reset()
+        # bs_size должен 0 по умолчанию, чтобы в код можно было делать
+        # проверки, типа #if $bssize, указывали на использование
+        # битслайса; к тому же без инициализации должно быть
+        # исключение о неизвестном поле, если не был вызван
+        # apply_bs_size, который отнюдь не всегда нужен
+        # ** размеры не сбрасываются при .reset()
+        self.bs_size = 0
+        self.bs_o_type = None
+        # ** обычные размеры должны быть установлены вручную всегда
+    def reset(self):
         self.code = ''
+        self.const_code = ''
         self.funcs_code = ''
-        self.out_names = []
+        self.output_names = []
+        self.quick_output_names = []
+        self.input_bs_names = []
+        self.output_bs_names = []
         self.bit_lengths = {}
         self.bit_length_bits = []
         self.cycles = {}
         self.use_define = [False]
+        # %% надо переименовать inputs в input_names
         self.inputs = []
+        # словарь определений переменных: тип => { имя => 1, имя => 1 }
+        self.var_definitions = {}
+        # словарь для трекания состояния инструкции get_from_padded_string
+        # имя строки -> массив имён
+        self.padded_strings = {}
+        # self.lengths = { '_count': 0 }
+        self.types = {}
 
 g = Global()
 
@@ -58,6 +99,18 @@ def c(code, *args):
 
 def c_prepend(code, *args):
     Global.c_output.code = code.format(*args) + "\n" + Global.c_output.code
+
+# функция вывода один раз
+written_once = {}
+def c_once(code, *args):
+    o = code.format(*args)
+    if o not in written_once:
+        written_once[o] = 1
+        c(o)
+
+# функция вывода кода практически в начало файла
+def c_const(code, *args):
+    Global.c_output.const_code += code.format(*args) + "\n"
 
 # враппер для присваиваний, которые можно выразить define'ом
 def a(code, *args):
@@ -87,9 +140,24 @@ def apply_size(size):
     g.size = size
     g.o_type = size_type[size]
     g.o_format_x = size_format_x[size]
+    g.o_format_u = size_format_u[size]
     g.o_suffix = size_suffix[size]
     g.bits = size * 8
+    g.vsize = 16 / size
 
+# Endianness / endianity setup
+def apply_endianity(endianity):
+    assert endianity in ['le', 'be']
+    g.endianity = endianity
+    if endianity == 'be':
+        g.need_input_swap = 1
+    else:
+        g.need_input_swap = 0
+
+# %% bs_size - в битах, size - в байтах, не очень хорошо
+def apply_bs_size(bs_size):
+    g.bs_size = bs_size
+    g.bs_o_type = bs_size_type[bs_size]
 
 def partition(l, n):
     if len(l) % n != 0 or n < 1:
@@ -120,9 +188,6 @@ def load_iuf(algo):
 
 # %% стоит делать проверку аргументов на тип
 
-# словарь определений переменных: тип => { имя => 1, имя => 1 }
-var_definitions = {}
-
 # одна переменная может быть описана несколько раз, реально она будет
 # описана только один раз
 def def_var(t, var):
@@ -131,9 +196,9 @@ def def_var(t, var):
     #     return
     if True:
         # Declaration go before the code
-        if t not in var_definitions:
-            var_definitions[t] = {}
-        var_definitions[t][var] = 1
+        if t not in g.var_definitions:
+            g.var_definitions[t] = {}
+        g.var_definitions[t][var] = 1
     else:
         # In-place declarations
         c('{0} {1} $align;', t, var)
@@ -144,15 +209,19 @@ def def_var_vector(var):
     def_var('__m128i', var)
 
 def gen_var_defs():
-    for i in var_definitions:
-        vs = var_definitions[i]
-        c_prepend('{0} {1} $align;', i, " $align, ".join(vs.keys()))
+    for i in g.var_definitions:
+        vs = g.var_definitions[i]
+        # c_prepend('{0} {1} $align;', i, " $align, ".join(vs.keys()))
+        c_prepend('{0} {1};', i, ", ".join("{0} $align".format(v) for v in vs.keys()))
 
-types = {}
+
 
 # ######################################################################
 # b_* - definitions of functions to handle each bytecode instruction.
 # b_v_* - vectorized, has its own section
+
+def b_print_verbatim(hexed):
+    c('printf("pv: %s\\n", "{0}");', ''.join('\\x' + hexed[i * 2 : i * 2 + 2] for i in range(len(hexed) / 2)))
 
 def b_use_define(label):
     # %% parity?
@@ -164,6 +233,7 @@ def b_use_define(label):
 def b_new_const(name, value):
     # %% handle $suffix according to output type, not algo's type
     c('#define {0} {1}$suffix', name, value)
+    # c_const('#define {0} {1}$suffix', name, value)
 
 def b_new_var(name):
     # c('$type {0};', name)
@@ -187,18 +257,56 @@ def b_input_rounds(name):
     # %% is atoi good?
     a('$type {0} = atoi(argv[3]);', name)
 
+# def b_input_key(name):
+#     types[name] = 'string'
+#     if Global.c_output is g:
+#         c('#define {0} (argv[1])', name)
+#         # c('#define {0} ((const char *)saved_key[index/MMX_COEF_SHA512 + myindex])', name)
+#     elif Global.c_output is funcs:
+#         c('#define {0} (state->buf)', name)
+#     else:
+#         not_implemented()
+
 def b_input_key(name):
-    types[name] = 'string'
-    if Global.c_output is g:
-        c('#define {0} (argv[1])', name)
-        # c('#define {0} ((const char *)saved_key[index/MMX_COEF_SHA512 + myindex])', name)
-    elif Global.c_output is funcs:
-        c('#define {0} (state->buf)', name)
+    g.types[name] = 'string'
+    # c('#define {0} (($type *)(saved_key[index]))', name)
+    c('#define {0} (saved_key[index])', name)
+
+def get_from_padded_string(name, string):
+    # Выводим код для копирования из буфера в переменную
+    # c('#define {0} (JOHNSWAP64((($type*)saved_key[index])[{1}]))',
+    c('#define {0} (JOHNSWAP$bits(p[{1}]))',
+      name, len(g.padded_strings[string]))
+    g.padded_strings[string].append(name)
+
+# совмещённая функция для добавления 0x80, паддинга и записи
+# длины в конец, для sha2;
+# одна инструкция - один выходной инт, так что можно собрать всё и
+# потом вывести; или вначале разобрать в буфер, а потом уже раздавать
+def b_get_from_key_0x80_padding_length(name, string):
+    # Проверяем, что ещё не разложили строку
+    if string in g.padded_strings:
+        # Если строка имеет паддинг, то просто возвращаем значение.
+        get_from_padded_string(name, string)
     else:
-        not_implemented()
+        # Если строка не имеет паддинга, делаем его, а потом
+        # возвращаем первое значение.
+        # %% делать имя на ходу
+        c('''
+        $type p[(PLAINTEXT_LENGTH + 1)/$size + 2];
+        memset(p, 0, sizeof(p));
+        size_t l = strlen({0});
+        printf("padding: l = %d\\n", l);
+        memcpy(p, saved_key[index], l);
+        ((unsigned char *)p)[l] = 0x80;
+        p[(PLAINTEXT_LENGTH + 1)/$size] = 0;
+        p[(PLAINTEXT_LENGTH + 1)/$size + 1] = JOHNSWAP$bits(l << 3);
+        ''', string)
+        g.padded_strings[string] = []
+        get_from_padded_string(name, string)
 
 def b_input_salt(name):
-    types[name] = 'string'
+    g.types[name] = 'string'
     # %% checks?
     if Global.c_output is g:
         c('#define {0} (argv[2])', name)
@@ -215,25 +323,37 @@ def b_output(var):
         # c('''
         # for (i = 0; i < $size; i++) {{
         #     ((unsigned char*)&( (crypt_out[index/MMX_COEF_SHA512 + {1} * MMX_COEF_SHA512][myindex]) ))[$size * {1} + i] = ((unsigned char *)&{0})[$size - i - 1];
-        # }}''', var, len(g.out_names))
+        # }}''', var, len(g.output_names))
         # c('''
         # for (i = 0; i < $size; i++) {{
         #     ((unsigned char*)&( (($type*)(crypt_out[index/MMX_COEF_SHA512]))[myindex + {1} * MMX_COEF_SHA512] ))[i] = ((unsigned char*)&{0})[$size - i - 1];
-        # }}''', var, len(g.out_names))
-        c('''
-(($type*)(crypt_out[index/MMX_COEF_SHA512]))[myindex + {1} * MMX_COEF_SHA512] = {0};
-        ''', var, len(g.out_names))
-        g.out_names.append(var)
+        # }}''', var, len(g.output_names))
+#         c('''
+# (($type*)(crypt_out[index/MMX_COEF_SHA512]))[myindex + {1} * MMX_COEF_SHA512] = {0};
+#         ''', var, len(g.output_names))
+        # c('''
+        # (($type*)(crypt_out[0]))[{1}] = {0};
+        # ''', var, len(g.output_names))
+        # c(''' /* no op: output {0} */  ''', var, len(g.output_names))
+        # c(''' crypt_out[0][{1} + 1] = {0}; ''', var, len(g.output_names))
+        c('dk_put_output({0}, {1});', var, len(g.output_names))
+        g.output_names.append(var)
     elif Global.c_output is funcs:
-        c('result->H[{0}] = {1};', len(funcs.out_names), var)
-        funcs.out_names.append(var)
+        c('result->H[{0}] = {1};', len(funcs.output_names), var)
+        funcs.output_names.append(var)
     else:
         not_implemented()
+
+def b_check_output(var):
+    # c('crypt_out[0][0] = {0};', var)
+    c('dk_quick_output({0});', var)
 
 def b_input(name):
     # В момент вывода отметки о входах должны быть убраны.
     # bad_instruction()
-    c('#define {0} ((($type*)saved_key[index/MMX_COEF_SHA512])[myindex + {1} * MMX_COEF_SHA512])',
+    # c('#define {0} ((($type*)saved_key[index/MMX_COEF_SHA512])[myindex + {1} * MMX_COEF_SHA512])',
+    # c('#define {0} (JOHNSWAP64((($type*)saved_key[0])[{1}]))mw',
+    c('#define {0} (dk_read_input({1}))',
     name, len(g.inputs))
     g.inputs.append(name)
 
@@ -270,8 +390,6 @@ for i in bin_ops:
 def b___floordiv__(lvalue, rvalue):
     # %% типы, кроме num, должны быть раскрыты до этого?
     c('{0} = {1};', lvalue, rvalue)
-
-lengths = { '_count': 0 }
 
 # def get_length(name):
 #     if name not in lengths:
@@ -318,11 +436,11 @@ def b_put0x80(string, length):
     c('{0}[{1}] = 0x80;', string, length)
 
 def b___getitem__(name, arr, idx):
-    if arr in types and types[arr] == 'string':
+    if arr in g.types and g.types[arr] == 'string':
         print >> sys.stderr, name, arr, idx
         # Если мы индексируем строку, то это означает взять инт из
         # неё, а не байт.
-    elif arr in types and types[arr] == 'digest':
+    elif arr in g.types and g.types[arr] == 'digest':
         # c('$type {0} = ({1}->H[{2}]);', name, arr, idx)
         a('$type {0} = ({1}->H[{2}]);', name, arr, idx)
     else:
@@ -334,12 +452,16 @@ def b___invert__(name, arg):
     # c('$type {0} = ~{1};', name, arg)
     a('$type {0} = ~{1};', name, arg)
 
+def b_swap_to_be(name, arg):
+    a('$type {0} = JOHNSWAP$bits({1});', name, arg)
+
+b_swap_to_le = b_swap_to_be
+
 def b_ror(name, arg1, arg2):
-    # c('$type {0} = ror({1}, {2});', name, arg1, arg2)
     a('$type {0} = ror({1}, {2});', name, arg1, arg2)
 
-# def b_rol(name, arg1, arg2):
-#     c('$type {0} = rol({1}, {2});', name, arg1, arg2)
+def b_rol(name, arg1, arg2):
+    a('$type {0} = rol({1}, {2});', name, arg1, arg2)
 
 def b_get_length(name, string):
     if Global.c_output is g:
@@ -387,7 +509,7 @@ def b_if_end(label):
     c('}}')
 
 def b_init(state_name, algo):
-    types[state_name] = 'digest_state'
+    g.types[state_name] = 'digest_state'
     # load_iuf(algo)
     c('struct digest_state* {0} = init();', state_name)
 
@@ -395,7 +517,7 @@ def b_update(state_name, string, length):
     c('update({0}, {1}, {2});', state_name, string, length)
 
 def b_final(digest_name, state_name):
-    types[digest_name] = 'digest'
+    g.types[digest_name] = 'digest'
     c('struct digest* {0} = final({1});', digest_name, state_name)
 
 def b_free(string):
@@ -440,15 +562,16 @@ def b_print_buf(string, length):
     printf("\\n");''', string, length)
 
 def b_print_var(name):
-    c('printf("  {0} is 0x $formatx %lld\\n", {0}, {0});', name)
+    c('printf("  {0} is 0x $formatx $formatu\\n", {0}, {0});', name)
 
 def b_goto(label):
     # %% automatic names?
     c('goto {0};', label)
 
 def b_label(label):
-    # %% 1; is a workaround to put labels anywhere, kind of noop.
-    c('{0}: (void)1;', label)
+    # c('{0}: ;', label)
+    # %% пока что выключено, так как не дружит с анролом
+    pass
 
 def b_digest_to_string(name, digest):
     # %% memory leak
@@ -490,43 +613,161 @@ digest final(digest_state)
 """
 
 # ######################################################################
+# bitslice versions b_bs_*
+
+# ** __floordiv__ -> bs_assign
+#  * __getitem__ -> bs_getitem
+#  * __xor__ -> bs_xor
+#  * __or__ -> bs_or
+#  * __and__ -> bs_and
+#  * __invert__ -> bs_invert
+
+
+# ** ops are without underscore: op instead of __op__
+bs_bin_ops = {
+# '__xor__': '^',
+# '__and__': '&',
+# '__or__': '|'
+'xor': '^',
+'and': '&',
+'or': '|'
+}
+
+# %% All ops except assignment may be expressed using either '#define'
+#  % or assignment. It may affect performance, try different.
+
+for i in bs_bin_ops:
+    v = bs_bin_ops[i]
+    def gen_func(c_op):
+        def func(name, arg1, arg2):
+            # %% должно зависеть от типа
+            a('$bstype {0} = {1} {2} {3};', name, arg1, c_op, arg2)
+        return func
+    exec('b_bs_{0} = gen_func(v)'.format(i))
+
+def b_bs_invert(name, arg1):
+    a('$bstype {0} = ~{1};', name, arg1)
+
+b_bs_assign = b___floordiv__
+
+# Функция создания констант
+# Создаёт только 2 константы: 0 и 1
+def b_bs_new_const(name, value):
+    assert(value == "0" or value == "1")
+    if value == "0":
+        # %% correct suffix
+        c("#define {0} 0ULL", name)
+    else:
+        c("#define {0} 0xFFFFFFFFFFFFFFFFULL", name)
+
+def b_bs_make_array(name, label, size):
+    c("$bstype {0} [{1}][$bssize];", name, size)
+
+def b_bs_getitem(name, array, idx, bit):
+    a('$bstype {0} = ({1}[{2}][{3}]);', name, array, idx, bit)
+
+def b_bs_set_item(array, idx, value, bit):
+    c('{0}[{1}][{3}] = {2};', array, idx, value, bit)
+
+def b_bs_new_var(name):
+    # %% support declarations before code
+    c('$bstype {0};', name)
+
+# ** We expect that all print_var() for 1 var go in 1 pack starting
+#  * from bit 0 and ending with bit N-1.
+# %% Make checks for that; можно было бы избавиться от этого: надо
+#  % просто трекать, сколько битов мы вывели, а если сохранить в
+#  % инструкции начальное имя, то можно даже по переменным трекать.
+#  % Правда, вывод может стать непредсказуемым, так что надо просто
+#  % ломаться, если не по порядку идут.
+def b_bs_print_var(name, bit):
+    # name - имя переменной, несущей вектор битов с номером bit
+    bit = int(bit)
+    # Мы выводим только первый и последний кандидаты из пачки
+    # Временные переменные для сбора битов
+    c_once('$type bs_first;')
+    c_once('$type bs_last;')
+    if bit == 0:
+        # В самом начале обнуляем временные переменные
+        c('bs_first = bs_last = 0;')
+    # Для каждого бита выводим код, кладущий бит во временные
+    # переменные
+    # c('bs_last |= (({0} & (1ULL << ($bssize - 1))) >> ($bssize - 1)) << ($bits - {0} - 1);', bit)
+    # c('bs_first |= (({0} & (1ULL << 0)) >> 0) << ($bits - {0} - 1);', bit)
+    c('bs_last |= (({0} >> ($bssize - 1)) & 1ULL) << ($bits - {1} - 1);', name, bit)
+    c('bs_first |= ({0} & 1ULL) << ($bits - {1} - 1);', name, bit)
+    if bit == g.bits - 1:
+        # Мы накопили всё, выводим переменные.
+        c('printf("first = $formatx  last = $formatx\\n", bs_first, bs_last);')
+
+def b_bs_output(name, bit):
+    # bit игнорируется на данный момент
+    i = len(g.output_bs_names)
+    g.output_bs_names.append(name)
+    c('crypt_out[{1}] = {0};', name, i)
+
+def b_bs_input(name, bit):
+    # bit игнорируется на данный момент
+    i = len(g.input_bs_names)
+    g.input_bs_names.append(name)
+    c('#define {0} (bits[{1}])', name, i)
+
+# ######################################################################
 # vectorized versions b_v_*
 
+# совмещённая функция для добавления 0x80, паддинга и записи
+# длины в конец, для sha2;
+# одна инструкция - один выходной инт, так что можно собрать всё и
+# потом вывести; или вначале разобрать в буфер, а потом уже раздавать
+def b_v_get_from_key_0x80_padding_length(name, string):
+    # Проверяем, что ещё не разложили строку
+    if string in g.padded_strings:
+        # Если строка имеет паддинг, то просто возвращаем значение.
+        v_get_from_padded_string(name, string)
+    else:
+        # Если строка не имеет паддинга, делаем его, а потом
+        # возвращаем первое значение.
+        v_put_0x80_padding_length(string)
+        g.padded_strings[string] = []
+        v_get_from_padded_string(name, string)
+
 def b_v_input(name):
-    # В момент вывода отметки о входах должны быть убраны.
     # bad_instruction()
-    # c('''
-    # for (i = 0; i < 16; i++) {{
-    #     printf("%02x", ((unsigned char *)&(((__m128i*)(saved_key[index/MMX_COEF_SHA512]))[{1}]))[i]);
-    # }}
-    # printf("\\n");
-    # ''', name, len(g.inputs))
-    # c('#define {0} _mm_load_si128(&(((__m128i*)(saved_key[index/MMX_COEF_SHA512]))[{1}]))',
-    a('__m128i {0} = _mm_load_si128(&(((__m128i*)(saved_key[index/MMX_COEF_SHA512]))[{1}]));',
+    a('__m128i {0} = dk_v_read_input({1});',
     name, len(g.inputs))
     g.inputs.append(name)
+
+def b_v_check_output(var):
+    # c('crypt_out[0][0] = {0};', var)
+    c('dk_v_quick_output({0}, {1});', var, len(g.quick_output_names))
+    g.quick_output_names.append(var)
 
 def b_v_output(var):
     if Global.c_output is g:
         # _mm_store_si128((__m128i *) &(crypt_out[index/MMX_COEF_SHA512][{1}]), {0});
-        c('''
-_mm_store_si128(&(((__m128i*)(crypt_out[index/MMX_COEF_SHA512]))[{1}]), {0});
-        ''', var, len(g.out_names))
-        g.out_names.append(var)
+#         c('''
+# _mm_store_si128(&(((__m128i*)(crypt_out[index/MMX_COEF_SHA512]))[{1}]), {0});
+#         ''', var, len(g.output_names))
+        c('dk_v_put_output({0}, {1});', var, len(g.output_names))
+        g.output_names.append(var)
     # elif Global.c_output is funcs:
-    #     c('result->H[{0}] = {1};', len(funcs.out_names), var)
-    #     funcs.out_names.append(var)
+    #     c('result->H[{0}] = {1};', len(funcs.output_names), var)
+    #     funcs.output_names.append(var)
     else:
         not_implemented()
 
 def b_v_new_const(name, value):
     # %% handle $suffix according to output type, not algo's type
     # %% make an option to choose between set1 and load
-    c('#define {0} _mm_set1_epi64x({1}$suffix)', name, value)
+    suf = '32' if g.bits == 32 else '64x'
+    c('#define {0} _mm_set1_epi{2}({1}$suffix)', name, value, suf)
     # c('#define {0} _mm_set_epi64x({1}$suffix, {1}$suffix)', name, value)
     # # %% correct $type here
     # c_prepend('static unsigned long long {0}_stored[4] __attribute__((aligned(16))) = {{ {1}$suffix, {1}$suffix, {1}$suffix, {1}$suffix }};', name, value)
     # c('#define {0} _mm_load_si128((__m128i *){0}_stored)', name)
+
+def b_v_swap_to_be(name, arg):
+    a('__m128i {0} = vshuffle_epi8({1}, swap_endian${{bits}}_mask);', name, arg)
 
 b_v_new_state_var = b_new_state_var
 
@@ -545,15 +786,21 @@ def b_v_make_array(name, label, size):
 def b_v_ror(name, arg1, arg2):
     # %% use shuffle for rotates of 8
     # %% subst ror at bytecode level when not XOP
-    a('__m128i {0} = _mm_roti_epi64({1}, {2});', name, arg1, arg2)
+    a('__m128i {0} = _mm_roti_epi$bits({1}, {2});', name, arg1, arg2)
+
+def b_v_rol(name, arg1, arg2):
+    # %% use shuffle for rotates of 8
+    # %% subst ror at bytecode level when not XOP
+    # a('__m128i {0} = my_rol_epi$bits({1}, {2});', name, arg1, arg2)
+    a('__m128i {0} = vroti_epi$bits({1}, {2});', name, arg1, arg2)
 
 v_bin_ops = {
-'__add__': '_mm_add_epi64',
-'__sub__': '_mm_sub_epi64',
+'__add__': '_mm_add_epi$bits',
+'__sub__': '_mm_sub_epi$bits',
 '__xor__': '_mm_xor_si128',
-'__mul__': '_mm_mullo_epi64',
-'__rshift__': '_mm_srli_epi64',
-'__lshift__': '_mm_slli_epi64',
+'__mul__': '_mm_mullo_epi$bits',
+'__rshift__': '_mm_srli_epi$bits',
+'__lshift__': '_mm_slli_epi$bits',
 '__and__': '_mm_and_si128',
 '__or__': '_mm_or_si128',
 # '__mod__': '%',
@@ -600,8 +847,10 @@ def b_v_andnot(name, arg1, arg2):
 
 def b_v___invert__(name, arg):
     # %% just warn if used
-    # c('__m128i {0} = _mm_xor_si128({1}, _mm_set1_epi32(0xFFFFFFFF));', name, arg)
-    bad_instruction()
+    # it is needed for md5
+    a('__m128i {0} = _mm_xor_si128({1}, _mm_set1_epi32(0xFFFFFFFFU));', name, arg)
+    # a('__m128i {0} = _mm_andnot_si128({1}, _mm_set1_epi32(0xFFFFFFFFU));', name, arg)
+    # bad_instruction()
 
 def b_v___getitem__(name, arr, idx):
     # %% use '#define' to allow assignments
@@ -612,7 +861,15 @@ b_v_set_item = b_set_item
 def b_v_print_var(name):
     c('''
     _mm_store_si128(&tmp, {0});
-    printf(" 0x $formatx 0x $formatx\\n", *(unsigned long long*)&tmp, *((unsigned long long*)&tmp + 1));
+#if $vsize == 2
+    printf(" 0x $formatx 0x $formatx\\n", *($type *)&tmp, *(($type *)&tmp + 1));
+#else
+#if $vsize == 4
+    printf(" 0x $formatx 0x $formatx 0x $formatx 0x $formatx\\n", *($type *)&tmp, (($type *)&tmp)[1], (($type *)&tmp)[2], (($type *)&tmp)[3]);
+#else
+#error "unsupported vsize ($vsize) for v_print_var"
+#endif
+#endif
     ''', name)
 
 
@@ -631,6 +888,8 @@ def out_all(code):
     # c('size_t i, j;')
     c('size_t i;')
     c('__m128i tmp;')
+    # %% это нужно только в векторных сборках
+    # c('__m128i tmp;')
     for l in code:
         if l[0] in bytecode_functions:
             bytecode_functions[l[0]](*l[1:])
@@ -638,7 +897,8 @@ def out_all(code):
             raise Exception("unknown instruction [{0}]".format(", ".join(l)))
     gen_var_defs()
 
-def gen(code, template, args, additional_replacements = {}):
+def gen_to_str(code, template, args, additional_replacements = {}):
+    g.reset()
     # %% стоит вынести ror/rol, можно раскрывать в другие операции
     # sha512 = B.get_code_full('iuf', False, False, { 'size': 8 })
     # Global.c_output = funcs
@@ -649,10 +909,10 @@ def gen(code, template, args, additional_replacements = {}):
     out_all(code)
     # print >> sys.stderr, temp
     # c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(temp)), ', '.join(temp))
-    if len(g.out_names) > 0:
-        # c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(g.out_names)), ', '.join(g.out_names))
+    if len(g.output_names) > 0:
+        # c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(g.output_names)), ', '.join(g.output_names))
         if args['use_bitslice']:
-            print_bs(g.out_names)
+            print_bs(g.output_names)
     # replace various global vars like size and type
     def subst_vars(code):
         # %% align only arrays?
@@ -660,36 +920,48 @@ def gen(code, template, args, additional_replacements = {}):
         #  * file in emacs.
         align = '__attribute__((aligned(16)))'
         align = ''
-        return Template(code).safe_substitute(type = g.o_type, formatx = g.o_format_x, bits = g.bits, size = g.size, suffix = g.o_suffix, align = align)
+        return Template(code).safe_substitute(type = g.o_type, formatx = g.o_format_x, formatu = g.o_format_u, bits = g.bits, size = g.size, suffix = g.o_suffix, align = align, bstype = g.bs_o_type, bssize = g.bs_size, input_swap = g.need_input_swap, vsize = g.vsize, **additional_replacements)
     # g.code = subst_vars(g.code)
     # g.funcs_code = subst_vars(g.funcs_code)
     # print code_template.safe_substitute(code = g.code, funcs = g.funcs_code)
-    print subst_vars(Template(template).safe_substitute(code = g.code, funcs = funcs.code, **additional_replacements))
+    g.code = subst_vars(g.code)
+    # %% наверное, так делать плохо, костылями попахивает...
+    # Делаем undef всего, что было определено макросами внутри куска кода
+    defines = re.compile('^#\s*define\s*(\w+)', re.M).findall(g.code)
+    # %% определения могут быть не уникальными
+    g.code += ''.join(['#undef {0}\n'.format(i) for i in defines])
+    result = subst_vars(Template(template).safe_substitute(code = g.code, constants = g.const_code))
+    return result
 
-def main(code, args):
-    # %% copy-pasted, see gen()
-    # %% стоит вынести ror/rol, можно раскрывать в другие операции
-    sha512 = B.get_code_full('iuf', False, False, { 'size': 8 })
-    Global.c_output = funcs
-    c('#define ror(a, b) (((a) << ($bits - (b))) | ((a) >> (b)))')
-    c('#define rol(a, b) (((a) >> ($bits - (b))) | ((a) << (b)))')
-    out_all(sha512)
-    Global.c_output = g
-    out_all(code)
-    # print >> sys.stderr, temp
-    # c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(temp)), ', '.join(temp))
-    if len(g.out_names) > 0:
-        c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(g.out_names)), ', '.join(g.out_names))
-        if args['use_bitslice']:
-            print_bs(g.out_names)
-    # replace various global vars like size and type
-    def subst_vars(code):
-        return Template(code).safe_substitute(type = g.o_type, formatx = g.o_format_x, bits = g.bits, size = g.size, suffix = g.o_suffix)
-    # g.code = subst_vars(g.code)
-    # g.funcs_code = subst_vars(g.funcs_code)
-    # print code_template.safe_substitute(code = g.code, funcs = g.funcs_code)
-    print subst_vars(Template(template).safe_substitute(code = g.code, funcs = funcs.code))
-    # gen(code, code_template, args)
+def gen(code, *args):
+    # g.reset()
+    print gen_to_str(code, *args)
+    return code
+
+# def main(code, args):
+#     # %% copy-pasted, see gen()
+#     # %% стоит вынести ror/rol, можно раскрывать в другие операции
+#     sha512 = B.get_code_full('iuf', False, False, { 'size': 8 })
+#     Global.c_output = funcs
+#     c('#define ror(a, b) (((a) << ($bits - (b))) | ((a) >> (b)))')
+#     c('#define rol(a, b) (((a) >> ($bits - (b))) | ((a) << (b)))')
+#     out_all(sha512)
+#     Global.c_output = g
+#     out_all(code)
+#     # print >> sys.stderr, temp
+#     # c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(temp)), ', '.join(temp))
+#     if len(g.output_names) > 0:
+#         c('printf("{0}\\n", {1});', ' '.join(('$formatx',) * len(g.output_names)), ', '.join(g.output_names))
+#         if args['use_bitslice']:
+#             print_bs(g.output_names)
+#     # replace various global vars like size and type
+#     def subst_vars(code):
+#         return Template(code).safe_substitute(type = g.o_type, formatx = g.o_format_x, bits = g.bits, size = g.size, suffix = g.o_suffix, bstype = g.bs_o_type, bssize = g.bs_size)
+#     # g.code = subst_vars(g.code)
+#     # g.funcs_code = subst_vars(g.funcs_code)
+#     # print code_template.safe_substitute(code = g.code, funcs = g.funcs_code)
+#     print subst_vars(Template(template).safe_substitute(code = g.code, funcs = funcs.code))
+#     # gen(code, code_template, args)
 
 
 code_template = """

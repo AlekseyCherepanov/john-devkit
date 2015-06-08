@@ -1,16 +1,23 @@
 # SHA256 abstract
 # http://en.wikipedia.org/wiki/SHA256
 
+# Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted.
+
 Var.setup('be', 4)
 
 # Getting in
-w = [None for i in range(0, 64)]
+w = make_array('w', 64)
 for i in range(0, 16):
-    w[i] = input()
+    t = input()
+    # print_var(t)
+    set_item(w, i, t)
 
 # State, Getting in too
 H_default = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
-H = [state(v) for v in H_default]
+H = [new_state_var(v) for v in H_default]
 
 k = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -22,33 +29,17 @@ k = [
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 ]
-k = [Const(v) for v in k]
-# for jt, vt in enumerate(k):
-#     debug_print_var(vt, 'k[{0}]'.format(jt))
-k = MyArray('k', k)
-# %% use my_const_array
+k = new_array('k', *[new_const(v) for v in k])
 
-# comment('before extension of w')
+i = cycle_const_range('setupW', 16, 64 - 1, 1)
 
-# %% hint that for optimization too
-for i in range(16, 64):
-    s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3)
-    s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10)
-    w[i] = w[i - 16] + s0 + w[i - 7] + s1
+s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3)
+s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10)
+set_item(w, i, w[i - 16] + s0 + w[i - 7] + s1)
 
-# for v in w:
-#     comment("v in w: " + str(v))
+cycle_end('setupW')
 
-# # do that not on MyArray
-# for jt, vt in enumerate(w):
-#     debug_print_var(vt, 'w[{0}]'.format(jt))
-
-w = MyArray('w', w)
-
-# comment('after extension of w')
-# comment('before main loop')
-
-a, b, c, d, e, f, g, h = [Var() for i in range(8)]
+a, b, c, d, e, f, g, h = [new_var() for i in range(8)]
 a // H[0];
 b // H[1];
 c // H[2];
@@ -122,4 +113,6 @@ H[7] += h
 
 # Getting out
 for v in H:
+    v = swap_to_be(v)
+    # print_var(v)
     output(v)

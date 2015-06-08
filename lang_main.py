@@ -1,13 +1,22 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
 
+# Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted.
+
 import sys
 import subprocess
+import pickle
 
 import bytecode_main as B
 from lang_spec import instructions
 
-from lang_common import args
+def get_args():
+    return pickle.loads(sys.argv[1])
+# to be used in algo_*.py
+args = get_args()
 
 # %% проверки повторения меток
 
@@ -64,6 +73,10 @@ for name in instructions:
                 # есть имена.
                 third = args[0]
             third = str(third)
+            if name == 'print_verbatim':
+                # Для print_verbatim мы делаем всё в hex'е, ему можно
+                # с пробелами передавать.
+                third = third.encode('hex')
             if third != '':
                 third = ' ' + third
             if return_type == 'void':
