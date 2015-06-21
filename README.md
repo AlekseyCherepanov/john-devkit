@@ -14,7 +14,7 @@ There is no documentation for dsl and bytecode. It is not obvious how many times
 
 There is a draft of hash parsing library by Alexander Cherepanov. It is not finished (and works by pure luck). It is included into john-devkit but it will be removed when the library become a persistent part of John the Ripper.
 
-7 "raw" formats were implemented: raw-sha256, raw-sha224, raw-sha512, raw-sha384, raw-md4, raw-md5, raw-sha1. SHA-2 family got speed up (~20% for SHA-256, ~5% for SHA-512). md5, md4 and sha1 got noticable slowdown (it needs investigation). (Such speed up for raw-sha256 may be caused by changes in test vector. Accurate benchmarks are needed.)
+7 "raw" formats were implemented: raw-sha256, raw-sha224, raw-sha512, raw-sha384, raw-md4, raw-md5, raw-sha1. SHA-2 family got speed up (~12% for SHA-256, ~5% for SHA-512). md5, md4 and sha1 got noticable slowdown (it needs investigation). (Such speed up for raw-sha256 may be caused by changes in test vector. Accurate benchmarks are needed.)
 
 raw-sha256 lost cisco hashes (base64 encoded) so benchmarks differ from John the Ripper not only due to optimizations.
 
@@ -54,12 +54,40 @@ Then the following will work:
 
 After the first run (for each format), you need to cd into JohnTheRipper/src/ , rerun ./configure script (otherwise you'll get "Unknown ciphertext format name requested") and rerun the command.
 
+## Files layout
+
+`algo_*.py` are abstract definitions of crypto primitives written in DSL.
+
+`bytecode_main.py` is the main library to transform intermediate representation.
+
+`format_john_*.py` are config files to output certain formats for john.
+
+`lang_main.py` and `lang_spec.py` contain support code for DSL.
+
+`LICENSE.jtr` contains license agreement of John the Ripper (`doc/LICENSE` from John the Ripper).
+
+`output_c.py` is the main library to output C code.
+
+`parsing.h` and `parsing_plug.c` are a draft of library to parse hashes by Alexander Cherepanov.
+
+`README.md` is this readme file.
+
+`run_format_raw.sh` is a script to call `format_john_*.py` quickly for "raw" formats, call disassembler and count instructions/size of crypt_all() method.
+
+`slides_2015-05-26_phdays_v.src.org` is a textual source of slides for PHDays V. See below.
+
+`t_raw.c` is a C template for "raw" formats. It contains padding and byteswap for endianity fix. It is derived from code of John the Ripper. See below about its license.
+
+`util_ui.py` is a miscellaneous library.
+
 ## Slides for PHDays V
+
+Benchmarks demonstrated at PHDays V are quite inaccurate: raw-sha256 and raw-sha224 are more likely to be only 12% over John the Ripper's speed.
 
 Source file of slides for talk about john-devkit at PHDays V is in
 `slides_2015-05-26_phdays_v.src.org`
 
-The slides contain code example from Keccak (from [JohnTheRipper/src/KeccakF-1600-unrolling.macros](https://github.com/magnumripper/JohnTheRipper/blob/bleeding-jumbo/src/KeccakF-1600-unrolling.macros) ) and code example from NetBSD's libcrypt (from [here](https://github.com/rumpkernel/netbsd-userspace-src/blob/3280867f12bbd346f39d5a4efb41fcf9b087bf33/lib/libcrypt/hmac_sha1.c) ). Everything else is under the following license:
+The slides contain code example from Keccak (from [JohnTheRipper/src/KeccakF-1600-unrolling.macros](https://github.com/magnumripper/JohnTheRipper/blob/bleeding-jumbo/src/KeccakF-1600-unrolling.macros)) and code example from NetBSD's libcrypt (from [here](https://github.com/rumpkernel/netbsd-userspace-src/blob/3280867f12bbd346f39d5a4efb41fcf9b087bf33/lib/libcrypt/hmac_sha1.c)). Everything else is under the following license:
 
 `Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>`
 
@@ -67,7 +95,7 @@ The slides contain code example from Keccak (from [JohnTheRipper/src/KeccakF-160
 
 Code examples are between `>>>>` and `<<<<` . `#` in text is quoted with `\`: so `\#include` is for plain `#include`.
 
-TODO: link to .pdf file, the script to compile slides.
+TODO: a link to .pdf file, a script to compile slides.
 
 ## Usage without John the Ripper
 
