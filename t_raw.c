@@ -37,6 +37,10 @@
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 
+/* #pragma GCC diagnostic ignored "-Wincompatible-pointer-types" */
+
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+
 #pragma GCC optimize 3
 
 #define FMT_STRUCT_NAME fmt_${fmt_struct_name}_dk
@@ -68,9 +72,9 @@ john_register_one(&FMT_STRUCT_NAME);
 #include <tmmintrin.h>
 #endif
 
-#define FORMAT_LABEL		"$format_name-dk"
+#define FORMAT_LABEL		"$format_name"
 #define FORMAT_NAME		""
-#define ALGORITHM_NAME          "$algo_name dk"
+#define ALGORITHM_NAME          "$algo_name"
 
 #define FORMAT_TAG              "$tag"
 #define TAG_LENGTH    (sizeof(FORMAT_TAG) - 1)
@@ -89,11 +93,11 @@ john_register_one(&FMT_STRUCT_NAME);
 
 #define MIN_KEYS_PER_CRYPT		1
 
-#if $vectorize
-#define MAX_KEYS_PER_CRYPT		$interleave * $vsize * $batch_size
-#else
-#define MAX_KEYS_PER_CRYPT		1
-#endif
+/* #if $vectorize */
+#define MAX_KEYS_PER_CRYPT		($interleave * $vsize * $batch_size)
+/* #else */
+/* #define MAX_KEYS_PER_CRYPT		1 */
+/* #endif */
 
 /* #define MAX_KEYS_PER_CRYPT		64 */
 
@@ -143,25 +147,16 @@ static struct fmt_tests tests[] = {
 )
 #endif
 
+/* /\* %% это для использования в ассемблере; а если в разных файлах такое будет? *\/ */
+/* const unsigned int dk_all_one[] = { 0xFFffFFffU, 0xFFffFFffU, 0xFFffFFffU, 0xFFffFFffU }; */
+/* const unsigned int dk_byte_swap_mask[] = { 0x0c0d0e0fU, 0x08090a0bU, 0x04050607U, 0x00010203U }; */
+/* const unsigned int dk_asm_byte_swap_mask[] = { 0x00010203U, 0x04050607U, 0x08090a0bU, 0x0c0d0e0fU }; */
+/* %% это стоит добавлять через g.asm_global_vars в b_a_begin() */
+
+$asm_global_vars;
 
 /* $constants */
 /*         ; */
-
-
-/* %% Не надо ли взять type в скобки? */
-/* %% Макросы большими буквами? */
-#define make_full_static_buf(type, var, len) static type (var)[(len)]
-/* %% А мне нужен alignment здесь? */
-#define make_dynamic_static_buf(type, var, len)         \
-    static type *var;                                   \
-    if (!var)                                           \
-        var = mem_alloc_tiny((len), MEM_ALIGN_WORD)
-
-#if 1
-#define make_static_buf make_dynamic_static_buf
-#else
-#define make_static_buf make_full_static_buf
-#endif
 
 
 /* Глобальные переменные для "общения" методов */
@@ -178,7 +173,7 @@ static $type saved_key[$batch_size][(PLAINTEXT_LENGTH + 1 + 2 * $size) / $size][
 /* static $type crypt_out[MAX_KEYS_PER_CRYPT][1]; */
 /* static $type crypt_out[9][MAX_KEYS_PER_CRYPT]; */
 /* static $type crypt_out[$interleave][1][$vsize]; */
-static $type crypt_out[$batch_size][1][$interleave][$vsize] $align;
+static $type crypt_out[MAX_KEYS_PER_CRYPT][1][$interleave][$vsize] $align;
 
 #define crypt_out_by_index(i, num) (crypt_out[(i) / $vsize / $interleave][(num)][(i) / $vsize % $interleave][(i) % $vsize])
 
@@ -194,12 +189,28 @@ static int valid(char *ciphertext, struct fmt_main *self)
 {
     /* Проверка, что хеш данного типа. */
 
-    /* printf(" valid(): %s\n", ciphertext); */
+    printf(" valid(): %s\n", ciphertext);
 
     /* %% Текущий hex проверяет, что длина <= заданной, мне же нужна фиксированная длина. */
     return proc_valid(ciphertext, HASH_FORMAT, BINARY_SIZE)
         || proc_valid(ciphertext, HASH_FORMAT_TAGGED, BINARY_SIZE);
 }
+
+
+/* %% Не надо ли взять type в скобки? */
+/* %% Макросы большими буквами? */
+#define make_full_static_buf(type, var, len) static type (var)[(len)]
+/* %% А мне нужен alignment здесь? */
+#define make_dynamic_static_buf(type, var, len)         \
+    static type *var;                                   \
+    if (!var)                                           \
+        var = mem_alloc_tiny((len), MEM_ALIGN_WORD)
+
+#if 1
+#define make_static_buf make_dynamic_static_buf
+#else
+#define make_static_buf make_full_static_buf
+#endif
 
 /* Оригинальный split() */
 /* %% было бы отлично делать такое при помощи parsing_plug */
@@ -230,14 +241,25 @@ static void *binary(char *ciphertext)
     size_t len;
     proc_extract(ciphertext, HASH_FORMAT_TAGGED, &len, buf + $size);
 
-#define dk_read_input(num) ((($type *)buf)[$reverse_num + 1])
+    size_t ii;
+#if $input_swap
+    for (ii = 1; ii < 9; ii++) {
+        (($type *)buf)[ii] = JOHNSWAP$bits((($type *)buf)[ii]);
+    }
+#endif
+
+/* #if $input_swap */
+/* #  define dk_read_input(num) (JOHNSWAP$bits((($type *)buf)[$reverse_num + 1])) */
+/* #else */
+#  define dk_read_input(num) ((($type *)buf)[$reverse_num + 1])
+/* #endif */
+
 #define dk_put_output(var, num) (($type *)buf)[0] = (var)
     $reverse;
 #undef dk_put_output
 #undef dk_read_input
 
     {
-        size_t i;
         printf(">> ");
         for (i = 0; i < BINARY_SIZE; i++) {
             printf("%02x", buf[i]);
@@ -348,12 +370,18 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 /* #define dk_v_read_input(num) (((num) == 14) ? _mm_set1_epi64x(0ULL) : (((num) == 15) ? dk_v_read_input_as_is((num)) : (vshuffle_epi8(dk_v_read_input_as_is((num)), swap_endian64_mask)))) */
 
 #if $input_swap
+#  define dk_read_input(num) (((num) == LEN_POS) ? (saved_key_by_index(batch_index, (num))) : (JOHNSWAP$bits(saved_key_by_index(batch_index, (num)))))
+#else
+#  define dk_read_input(num) (saved_key_by_index(batch_index, (num)))
+#endif
+
+#if $input_swap
 #  define dk_v_read_input(num) (((num) / $interleave == LEN_POS) ? dk_v_read_input_as_is((num)) : (vshuffle_epi8(dk_v_read_input_as_is((num)), swap_endian${bits}_mask)))
 #else
 #  define dk_v_read_input(num) dk_v_read_input_as_is((num))
 #endif
 
-/* #define dk_quick_output(var) crypt_out[index][qo++][0] = (var) */
+#define dk_quick_output(var, num) crypt_out[batch_index][0][(num)][0] = (var)
 #define dk_put_output(var, num)
 #define dk_v_quick_output(var, num) (_mm_store_si128((__m128i *)crypt_out[batch_index][0][(num)], (var)))
 
@@ -362,6 +390,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
     $code;
 #undef dk_put_output
 #undef dk_quick_output
+#undef dk_read_input
 
     }
 
@@ -380,6 +409,9 @@ static int cmp_all(void *binary, int count)
     int i;
 
     printf("cmp_all($b, count = %d): \n", count);
+
+    /* Without it, gcc gives warning: "array subscript is above array bounds [-Warray-bounds]" */
+    assert(count <= MAX_KEYS_PER_CRYPT);
 
     $type b = (($type *)binary)[0];
     int ii;
@@ -408,7 +440,7 @@ static int cmp_one(void *binary, int index)
 #  define dk_read_input(num) (saved_key_by_index(index, (num)))
 #endif
 
-#define dk_quick_output(var)
+#define dk_quick_output(var, num)
 #define dk_put_output(var, num) out[(num) + 1] = (var)
     $scalar;
 #undef dk_put_output

@@ -15,9 +15,16 @@ for i in range(0, 16):
     # print_var(t)
     set_item(w, i, t)
 
+# print_verbatim('input')
+# for i in range(16):
+#     print_var(w[i])
+
 # State, Getting in too
 H_default = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
 H = [new_state_var(v) for v in H_default]
+
+# print_verbatim('state')
+# map(print_var, H)
 
 k = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -48,19 +55,14 @@ e // H[4];
 f // H[5];
 g // H[6];
 h // H[7];
-# comment('varsbefore ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
 
 # Main loop
 i = cycle_const_range('main', 0, 63, 1)
+# i = cycle_const_range('main', 0, 2, 1)
 
-# debug_print_var(a, "a")
-# debug_print_var(b, "b")
-# debug_print_var(c, "c")
-# debug_print_var(d, "d")
-# debug_print_var(e, "e")
-# debug_print_var(f, "f")
-# debug_print_var(g, "g")
-# debug_print_var(h, "h")
+# print_verbatim('round')
+# # print_var(i)
+# map(print_var, [a, b, c, d, e, f, g, h])
 
 s0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)
 maj = (a & b) ^ (a & c) ^ (b & c)
@@ -68,6 +70,14 @@ t2 = s0 + maj
 s1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)
 ch = (e & f) ^ (~e & g)
 t1 = h + s1 + ch + k[i] + w[i]
+
+# t2 = k[i]
+# # t1 = w[i]
+# s1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)
+# s2 = ror(a, 8) ^ ror(a, 19) ^ ror(a, 13)
+# ch = (e & f) ^ (~e & g)
+# maj = (a & b) ^ (a & c) ^ (b & c)
+# t1 = h + s1 + s2 + ch + maj + k[i] + w[i]
 
 h // g
 g // f
@@ -77,7 +87,10 @@ d // c
 c // b
 b // a
 a // (t1 + t2)
-# comment('vars ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
+
+# print_verbatim('round')
+# map(print_var, [a, b, c, d, e, f, g, h])
+# debug_exit('exit')
 
 # End of main loop
 cycle_end('main')
@@ -99,8 +112,6 @@ cycle_end('main')
 #     b = a
 #     a = (t1 + t2)
 
-# comment('after main loop')
-
 # Updating state
 H[0] += a
 H[1] += b
@@ -111,8 +122,16 @@ H[5] += f
 H[6] += g
 H[7] += h
 
+# print_verbatim('end')
+
+# print_verbatim('debug_end')
+# map(print_var, H)
+
 # Getting out
 for v in H:
-    v = swap_to_be(v)
+
+    # v = swap_to_be(v)
+
     # print_var(v)
+
     output(v)

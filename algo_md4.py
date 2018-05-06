@@ -14,10 +14,10 @@ for j in range(16):
     t = input()
     X.append(t)
 
-A = new_const(0x67452301)
-B = new_const(0xefcdab89)
-C = new_const(0x98badcfe)
-D = new_const(0x10325476)
+A = new_state_var(0x67452301)
+B = new_state_var(0xefcdab89)
+C = new_state_var(0x98badcfe)
+D = new_state_var(0x10325476)
 
 # F = lambda x, y, z: (x & y) | (~x & z)
 F = lambda x, y, z: z ^ (x & (y ^ z))

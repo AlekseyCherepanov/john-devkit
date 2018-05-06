@@ -6,6 +6,9 @@
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted.
 
+# # Disable output
+# print_verbatim = print_var = lambda *a: 1
+
 Var.setup('be', 8)
 
 # key = input_key()
@@ -14,23 +17,19 @@ w = make_array('w', 80)
 
 # print_var(0x1234)
 
+inputs = [input() for i in range(0, 16)]
+
 # Getting in
-for i in range(0, 16):
-    print_verbatim(">1> " + str(i))
-    t = input()
-    # t = get_from_key_0x80_padding_length(key)
-    # print_verbatim(">2> " + str(i))
+for i, t in enumerate(inputs):
     set_item(w, i, t)
-    # print_verbatim(">3> " + str(i))
-    print_var(t)
-    # print_verbatim(">4> " + str(i))
-    # print_var(w[i])
 
 # comment('input: {0}', " ".join(str(v) for v in w[0:16]))
 
 # State, Getting in too
 H_default = [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179]
 H = [new_state_var(v) for v in H_default]
+
+H_orig = list(H)
 
 k = [
     0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc, 0x3956c25bf348b538,
@@ -60,6 +59,8 @@ a = w[i - 15]
 s0 = ror(a,  1) ^ ror(a,  8) ^ (a >> 7)
 b = w[i - 2]
 s1 = ror(b, 19) ^ ror(b, 61) ^ (b >> 6)
+# s0 = ror(w[i - 15],  1) ^ ror(w[i - 15],  8) ^ (w[i - 15] >> 7)
+# s1 = ror(w[i - 2], 19) ^ ror(w[i - 2], 61) ^ (w[i - 2] >> 6)
 # %% Parenthesis are significant here. Though they does not affect much.
 set_item(w, i, w[i - 16] + s0 + (w[i - 7] + s1))
 
@@ -83,23 +84,6 @@ e // H[4]
 f // H[5]
 g // H[6]
 h // H[7]
-# comment('varsbefore ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
-
-# print_var(a)
-# s0 = ror(a, 28) ^ ror(a, 34) ^ ror(a, 39)
-# print_var(ror(a, 28))
-# print_var(s0)
-# maj = (a & b) ^ (a & c) ^ (b & c)
-# print_var(maj)
-# t2 = s0 + maj
-# print_var(t2)
-# s1 = ror(e, 14) ^ ror(e, 18) ^ ror(e, 41)
-# print_var(s1)
-# ch = (e & f) ^ (~e & g)
-# print_var(ch)
-# t1 = h + s1 + ch + k[0] + w[0]
-# print_var(t1)
-# print_var(0xFFFFFF)
 
 # Main loop
 i = cycle_const_range('main', 0, 79, 1)
@@ -119,8 +103,6 @@ t1 = h + (s1 + ch) + (k[i] + w[i])
 # t1 = h + (s1 + k[i]) + (ch + w[i])
 # t1 = s1 + (h + k[i]) + (ch + w[i])
 
-# print_var(a)
-
 h // g
 g // f
 f // e
@@ -129,7 +111,6 @@ d // c
 c // b
 b // a
 a // (t1 + t2)
-# comment('vars ' + "X" + ' ' + ' '.join(str(v) for v in (a, b, c, d, e, f, g, h)))
 
 # End of main loop
 cycle_end('main')
@@ -151,8 +132,6 @@ cycle_end('main')
 #     b = a
 #     a = (t1 + t2)
 
-# comment('after main loop')
-
 # Updating state
 H[0] += a
 H[1] += b
@@ -165,10 +144,14 @@ H[7] += h
 
 label('before_outputs')
 
+# print_many(*H_orig)
+# print_many(*inputs)
+# print_many(*H)
+
 # Getting out
 for i, v in enumerate(H):
-    print_verbatim(">out>1> " + str(i))
-    v = swap_to_be(v)
-    print_var(v)
+    # print_verbatim(">out>1> " + str(i))
+    # v = swap_to_be(v)
+    # print_var(v)
     output(v)
     # print_verbatim(">out>2> " + str(i))

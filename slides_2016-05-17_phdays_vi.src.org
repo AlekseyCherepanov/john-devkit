@@ -1,0 +1,234 @@
+Abstract from phdays.com:
+
+Speeds in hash cracking grow. The number of hashing algorithms grows.
+Work needed to maintain universal cracker grows too. The problem gave
+birth to john-devkit, an advanced code generator for the famous
+password cracker John the Ripper. More than 100 hash types are
+implemented within john-devkit. Its key aspects will be discussed:
+separation of algorithms, optimizations and output for different
+computing devices, simple intermediate representation of hashing
+algorithms, complexity of optimizations for humans and machines,
+bitslicing, comparison of speeds.
+
+Slides below:
+---
+
+john-devkit: 100 Hash Types Later
+
+Aleksey Cherepanov
+
+---
+
+john-devkit and John the Ripper (JtR)
+- john-devkit is a code generator for JtR
+  - it is an experiment and is not used in practice
+- JtR is the famous hash cracker
+  - primary purpose is to detect weak Unix passwords
+  - supports 200+ hash formats (types) coded by hand
+  - supports dynamic hash types described by formula at run-time
+  - and it can utilize CPUs, GPUs and even FPGAs (for bcrypt only)
+
+---
+
+The problem
+- there are a lot of hash types supported
+- developers care about speed
+  - even 5% change is worth of investigation in case of popular hash
+    types
+- it is fun to implement an optimization only once
+- then it is hard routine work to apply the optimization to all
+  implemented formats
+- it is very time consuming to improve all hash types
+
+---
+
+john-devkit as a possible solution
+- the main desired ability was/is to transform code by program
+  - optimizations may be viewed as transformations of code
+  - when we separate implementation into base code and optimizations
+    - the code may be easier
+    - optimizations may be reused for other algorithms again for free
+    - it is possible to play with optimizations easily
+- to simplify everything, john-devkit uses its own intermediate
+  representation (IR) of code
+  - IR is not low level
+  - IR is specific for cryptography
+- john-devkit uses DSL on top of Python to populate IR
+
+---
+
+Flow: describe algorithm
+- code example:
+>>>>
+from dk import *
+
+code = []
+with L.evaluate_to(code):
+    L.Var.setup(4, 'le')
+    a, b = L.input(), L.input()
+    c = a + b
+    print c
+    L.output(c)
+
+for instruction in code:
+    print instruction
+[...]
+<<<<
+
+---
+
+Flow: describe algorithm, output
+- output from the example:
+>>>>
+<lang_main.Var object at 0x00007f88d07ec800>
+['var_setup', '4', 'le']
+['input', 'lib1']
+['input', 'lib2']
+['__add__', 'lib3', 'lib1', 'lib2']
+['output', 'lib3']
+<<<<
+
+---
+
+Flow: describe algorithm, comments
+- 'print c' is evaluated in Python and is not included into IR
+- c in 'print c' was DSL's object, not a regular value
+- operators are overloaded to emit instruction and give new objects
+- john-devkit does not affect AST or bytecode of Python and may be run
+  on any implementation of Python (usually PyPy for speed)
+- from Python's POV, DSL is just a way to fill list of instructions
+  - DSL may be used to describe full program, or a small part (it is
+    used in optimizations)
+- from POV of a program in DSL, Python is a preprocessor
+  - Python is fully evaluated before IR is converted further
+  - Python is very mighty preprocessor
+  - DSL does not see names of variables in Python
+
+---
+
+Flow: IR and transformations
+- 1 instruction: '\_\_add\_\_', 'lib3', 'lib1', 'lib2'
+- IR is very simple and certain
+  - the whole program is just a list of lists of strings
+  - each instruction has operator name and list of arguments
+  - most instructions do not modify arguments
+    - they return new "objects" instead
+    - so IR is close to Static Single Assignment (SSA) form
+    - it is friendly to transformations
+- when IR is obtained, transformations occur
+  - programmer is free to do anything on this list of instructions
+    - use existing filter
+    - create custom filter
+  - we'll skip code example of transformations
+
+---
+
+Flow: output to C
+- code example:
+>>>>
+[...]
+c_template = r'''
+#include <stdio.h>
+int main(void)
+{
+    $type out, in[2] = { 11, 22 };
+#define dk_input(i) (in[(i)])
+#define dk_output(v, i) (out = (v))
+    $code
+    printf("from C: %d\n", out);
+}'''
+O.gen(code, 't.c', c_template, {}, {})
+<<<<
+
+---
+
+Flow: output code, output
+- the generated code:
+>>>>
+#include <stdio.h>
+int main(void)
+{
+    unsigned int out, in[2] = { 11, 22 };
+#define dk_input(i) (in[(i)])
+#define dk_output(v, i) (out = (v))
+#define lib1 (dk_input(0))
+#define lib2 (dk_input(1))
+    unsigned int lib3 ;
+    lib3 = lib1 + lib2;
+    dk_output(lib3, 0);
+#undef lib1
+#undef lib2
+    printf("from C: %d\n", out);
+}
+<<<<
+
+---
+
+Flow: output code, comments
+- our final product is code in target language
+  - it is C
+  - PoC output to OpenCL exists
+- john-devkit uses a template to insert code into
+  - it is implemented with standard string.Template class in Python
+  - several variables are inserted into template
+  - template has to define macros to connect generated code with
+    environment
+- john-devkit produces code with structure similar to IR
+  - the code is linear and noisy
+  - it is possible to manually map generated code to source
+    instructions of IR for debugging without special tools
+  - code below is re-indented for readability
+- generated code may be compiled by a regular C compiler
+  - produced format for JtR are built just like other formats
+
+---
+
+Implemented formats
+- in previous year, 7 formats were implemented with focus on
+  performance successfully
+- now the focus is on number of hash types:
+- 9 iterated hash types:
+  - pbkdf2-hmac-{md5,sha1,sha256,sha512}
+  - hmac-{md5,sha1,sha256,sha512}
+  - 1 variant of TrueCrypt: pbkdf2-hmac-sha512 + AES XTS
+- dynamic hash types, 102 were tested:
+  - including 62 real world hash types, like
+    - md5(md5($p).$s) (vBulletin)
+    - md5(md5($s).md5($p)) (IPB)
+  - including 40 synthetic hash types, like
+    - sha512($s.sha512($p))
+- but speeds are poor yet because optimizations were not applied
+
+---
+
+Observed problems
+- C template is very time consuming part
+  - some optimizations like interleaving, vectorization and bitslicing
+    need support in template
+  - some hash types need separate templates
+    - TrueCrypt format tries to decrypt full block and check crc32 of
+      data
+    - it may be implemented in john-devkit later
+- it is possible to describe new hash type by formula as in JtR
+- it is possible to describe transformations for 1 format well
+- but good optimizations and mass production were not combined
+  - in best cases, generated formats are slower than dynamic hash
+    types in JtR by size of SIMD vector
+- john-devkit and hash types are being developed together
+  - a hash type code is tweaked to better fit optimizations
+  - new optimizations need new instructions in IR and backend
+
+---
+
+Conclusions
+- john-devkit can produce good code
+- john-devkit can produce many hash types
+- but not together, it needs more work
+
+---
+
+Thank you!
+- Thank you!
+- code: https://github.com/AlekseyCherepanov/john-devkit
+- more technical detail will be on john-dev mailing list
+- my email: lyosha@openwall.com

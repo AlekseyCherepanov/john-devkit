@@ -2,42 +2,17 @@
 
 john-devkit is an advanced code generator for [John the Ripper](https://github.com/magnumripper/JohnTheRipper). It aims to separate crypto primitives (sha-512, md5, crypt, pbdkf2 and so on), optimizations (interleave, loop unrolling, round reversing, bitslice and so on) and output for different computing devices (cpu, sse, gpu, fpga).
 
-john-devkit uses its own domain specific language (dsl) on top of Python to describe crypto algorithms in an abstract way. Also there is a kind of instruction language for intermediate representation (referenced as "bytecode"). So there are two levels of code generation: dsl -> bytecode -> platform's language (for instance C for cpu).
+john-devkit uses its own domain specific language (dsl) on top of Python to describe crypto algorithms in an abstract way. Also there is a kind of instruction language for intermediate representation (referenced as "bytecode"). So there are two levels of code generation: dsl -> intermediate representation -> platform's language (for instance C for cpu).
 
-"bytecode" is a wrong word for the intermediate language/representation and will be fixed soon.
+"bytecode" is a wrong word for the intermediate language/representation and will be fixed in code someday.
 
 ## Current State
 
 The current implementation is a Proof of Concept.
 
-There is no documentation for dsl and bytecode. It is not obvious how many times everything will be changed drastically.
+There is no documentation for dsl and intermediate. It is not obvious how many times everything will be changed drastically.
 
 There is a draft of hash parsing library by Alexander Cherepanov. It is not finished (and works by pure luck). It is included into john-devkit but it will be removed when the library become a persistent part of John the Ripper.
-
-7 "raw" formats were implemented: raw-sha256, raw-sha224, raw-sha512, raw-sha384, raw-md4, raw-md5, raw-sha1. SHA-2 family got speed up (~12% for SHA-256, ~5% for SHA-512). md5, md4 and sha1 got noticable slowdown (it needs investigation). (Such speed up for raw-sha256 may be caused by changes in test vector. Accurate benchmarks are needed.)
-
-raw-sha256 lost cisco hashes (base64 encoded) so benchmarks differ from John the Ripper not only due to optimizations.
-
-The current main priority is to try more complex formats like sha256crypt.
-
-john-devkit has now:
-  * formats: raw-sha256, raw-sha224, raw-sha512, raw-sha384, raw-md4, raw-md5, raw-sha1
-  * optimizations: vectorization (sse only), early reject, interleave, loop unrolling, additional batching in crypt_all() method
-
-broken:
-  * reverse (there is only initial implementation, it has problems with vectorization)
-  * bitslice (there is no support in template file; no long vectors, only regular ints for vectors)
-  * output to standalone program (it will not be fixed soon)
-
-Nearest plans:
-  * output to avx and avx2 for better benchmarking
-  * fix bitslice and play with it
-  * investigate md5/md4 slowdown (on sse)
-  * fix reverse
-  * sha2crypt scheme
-  * output formats for john on gpu
-  * incorporate on-gpu mask-mode
-  * try kernel splitting
 
 ## Usage
 
@@ -54,13 +29,21 @@ Then the following will work:
 
 After the first run (for each format), you need to cd into JohnTheRipper/src/ , rerun ./configure script (otherwise you'll get "Unknown ciphertext format name requested") and rerun the command.
 
+Calling `format_abstract_all.py` can give various formats. It is tricky though because it does not work with `run_format_raw.sh` and may require changes to enable or disable certain formats.
+
 ## Files layout
 
 `algo_*.py` are abstract definitions of crypto primitives written in DSL.
 
 `bytecode_main.py` is the main library to transform intermediate representation.
 
-`format_john_*.py` are config files to output certain formats for john.
+`bytecode_*.py` are other files with filters for intermediate representation.
+
+`format_abstract_all.py` is a big mess with code to generate and test ~100 formats for john. TODO: split the file.
+
+`format_john_*.py` are other config files to output certain formats for john.
+
+`format_*.py` are config files to produce other output files (1 hash algo per file usually).
 
 `lang_main.py` and `lang_spec.py` contain support code for DSL.
 
@@ -74,18 +57,19 @@ After the first run (for each format), you need to cd into JohnTheRipper/src/ , 
 
 `run_format_raw.sh` is a script to call `format_john_*.py` quickly for "raw" formats, call disassembler and count instructions/size of crypt_all() method.
 
-`slides_2015-05-26_phdays_v.src.org` is a textual source of slides for PHDays V. See below.
+`slides_*.src.org` are textual source files of slides for talks. See below.
 
 `t_raw.c` is a C template for "raw" formats. It contains padding and byteswap for endianity fix. It is derived from code of John the Ripper. See below about its license.
 
-`util_ui.py` is a miscellaneous library.
+`t_*` are other templates.
 
-## Slides for PHDays V
+`util_*.py` are miscellaneous library files.
+
+## Slides for PHDays V, 2015
 
 Benchmarks demonstrated at PHDays V are quite inaccurate: raw-sha256 and raw-sha224 are more likely to be only 12% over John the Ripper's speed.
 
-Source file of slides for talk about john-devkit at PHDays V is in
-`slides_2015-05-26_phdays_v.src.org`
+Source file of slides for talk about john-devkit at PHDays V is in `slides_2015-05-26_phdays_v.src.org`.
 
 The slides contain code example from Keccak (from [JohnTheRipper/src/KeccakF-1600-unrolling.macros](https://github.com/magnumripper/JohnTheRipper/blob/bleeding-jumbo/src/KeccakF-1600-unrolling.macros)) and code example from NetBSD's libcrypt (from [here](https://github.com/rumpkernel/netbsd-userspace-src/blob/3280867f12bbd346f39d5a4efb41fcf9b087bf33/lib/libcrypt/hmac_sha1.c)). Everything else is under the following license:
 
@@ -97,9 +81,15 @@ Code examples are between `>>>>` and `<<<<` . `#` in text is quoted with `\`: so
 
 TODO: a link to .pdf file, a script to compile slides.
 
+## Slides for PHDays VI, 2016
+
+Source file of slides for talk about john-devkit at PHDays VI is in `slides_2016-05-17_phdays_vi.src.org`. The code example is in `simple_example.py`.
+
+TODO: a link to .pdf file.
+
 ## Usage without John the Ripper
 
-The idea to write a hash algo in Python and get optimized C code is very attractive. But there are limitations with john-devkit: john-devkit is not suitable for regular applications. It is a really bad idea to use john-devkit in most cases.
+The idea to write a hash algo in Python and get optimized C code is very attractive. But there are limitations with john-devkit: john-devkit is not suitable for regular applications. It is a really bad idea to use john-devkit in most cases. Please use standard/good libraries for hashing; for instance Argon2 (see [Password Hashing Competitions](https://password-hashing.net/)), [yescrypt](http://www.openwall.com/yescrypt/) or [phpass for php](http://www.openwall.com/phpass/).
 
 It is possible to separate john-devkit and John the Ripper (use custom C template, fix output in `output_c.py` for some instructions that depend on `pseudo_intrinsics.h` and/or `johnswap.h` or pull the headers into your application if the licenses permit).
 
@@ -108,8 +98,6 @@ Optimizations in john-devkit rely onto high parallelism of attacker's position, 
 Also it should be easier to implement and optimize 1 hash algo manually than using john-devkit (at least at the moment). john-devkit will benefit mostly from its scale: 200+ formats are still to be implemented.
 
 There is a totally "no-no" thing for regular applications: john-devkit does not care about security, there are no defensive tricks, for instance john-devkit does not prevent information disclose through timings, so produced code is weak against a range of attacks.
-
-Please use standard/good libraries for hashing. For instance phpass for php.
 
 ## License
 

@@ -9,9 +9,8 @@
 import util_ui as U
 import bytecode_main as B
 import output_c as O
-# import output_c_sse as O
 
-args = U.parse_args()
+# args = U.parse_args()
 
 c_template = 'raw'
 algo_file = 'sha512'
@@ -21,10 +20,11 @@ c_code = U.load_code_template(c_template)
 size = 8
 endianity = 'be'
 
+args = {}
 args['args'] = { 'size': size }
 
-O.apply_size(size)
-O.apply_endianity(endianity)
+# O.apply_size(size)
+# O.apply_endianity(endianity)
 
 bs_size = 64
 O.apply_bs_size(bs_size)
@@ -85,7 +85,29 @@ B.global_vars['reverse_num'] =  reverse_num
 
 B.global_vars['vectorize'] = 1
 
+
+# d = B.thread_code( B.get_code_full(algo_file, **args),
+#     B.replace_state_with_const,
+#     [ B.unroll_cycle_const_range, 'setupW' ],
+#     [ B.unroll_cycle_const_range, 'main' ],
+#     [ B.unpack_const_subscripts, 'k' ],
+#     B.remove_assignments,
+#     # [ B.dump, 'before.bytecode' ],
+#     [ B.compute_const_expressions, size ],
+#     B.drop_arrays,
+#     B.drop_print,
+#     [ B.compute_const_expressions, size ],
+#     B.bitslice,
+#     B.drop_unused,
+#     [ B.dump, 'test.bytecode' ],
+#     [ B.interpret,
+#       [ 0x657069786f697080, 0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000038 ],
+#       [ 0xf342aae82952db35, 0xb8e02c30115e3dee, 0xd3d80fdfdadacab3, 0x36f0ba51ac54e297, 0x291fa1d6b201d69a, 0x2bd77e2535280f17, 0xa54fa1e527abc6e2, 0xeddba79ad3be11c0 ]],
+#     B.my_exit,
+# )
+
 d = B.thread_code( code,
+    [ B.dump, 'test.bytecode' ],
     B.replace_state_with_const,
     [ B.dump, 'pure.bytecode' ],
     # [ B.bitslice, 64, size ],
@@ -96,7 +118,7 @@ d = B.thread_code( code,
     [ B.unroll_cycle_const_range, 'main' ],
     [ B.unpack_const_subscripts, 'k' ],
     B.remove_assignments,
-    B.compute_const_expressions,
+    [ B.compute_const_expressions, size ],
 
     # B.drop_print,
 

@@ -73,9 +73,13 @@ U.setup_vars(vs)
 
 # Optimizations and code generation
 
-interleave = 2
+interleave = 1
+# interleave = 2
 
+B.global_vars['batch_size'] = 1
 B.global_vars['batch_size'] = 10
+B.global_vars['batch_size'] = 20
+B.global_vars['batch_size'] = 16
 
 reverse_num = 4
 
@@ -84,18 +88,42 @@ B.global_vars['reverse_num'] =  reverse_num
 
 B.global_vars['vectorize'] = 1
 
-d = B.thread_code( B.get_code_full(algo_file, **args),
+d = B.thread_code( B.get_code_full('sha1_registers', **args),
+
+# d = B.thread_code( B.get_code_full(algo_file, **args),
+#     B.replace_state_with_const,
+#     [ B.unroll_cycle_const_range, 'setupW' ],
+#     B.remove_assignments,
+#     [ B.compute_const_expressions, size ],
+#     B.drop_arrays,
+#     B.drop_print,
+#     [ B.compute_const_expressions, size ],
+#     B.drop_unused,
+#     [ B.dump, 'all.bytecode' ],
+#     B.gen_asm,
+#     [ B.dump, 'asm.bytecode' ],
+# )
+# exit(0)
+
+# d = B.thread_code( B.get_code_full(algo_file, **args),
+
     B.replace_state_with_const,
     [ B.dump, 'pure.bytecode' ],
     # [ B.bitslice, 64, size ],
+
     # [ B.unroll_cycle_const_range, 'setupW' ],
     # [ B.unroll_cycle_const_range_partly, 'setupW', 16 ],
-    # [ B.unroll_cycle_const_range_partly, 'main', 40 ],
 
-    # [ B.unroll_cycle_const_range, 'main' ],
-    # [ B.unpack_const_subscripts, 'k' ],
+    # [ B.unroll_cycle_const_range, 'setupW' ],
     # B.remove_assignments,
-    # B.compute_const_expressions,
+    # [ B.compute_const_expressions, size ],
+    # B.drop_arrays,
+    # B.drop_print,
+    # [ B.compute_const_expressions, size ],
+    # B.drop_unused,
+
+    # B.remove_assignments,
+    # [ B.compute_const_expressions, size ],
 
     # B.drop_print,
 

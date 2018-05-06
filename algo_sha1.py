@@ -45,6 +45,8 @@ cycle_end('setupW')
 a, b, c, d, e = H
 
 for i in range(80):
+    # print_verbatim('i = ' + str(i))
+    # print_var(a)
     if 0 <= i <= 19:
         # f = (b & c) | ((~b) & d)
         f = d ^ (b & (c ^ d))
@@ -79,6 +81,6 @@ H[3] += d
 H[4] += e
 
 for v in H:
-    v = swap_to_be(v)
-    print_var(v)
+    # v = swap_to_be(v)
+    # print_var(v)
     output(v)

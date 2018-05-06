@@ -65,6 +65,7 @@ state = [
 
 code = B.thread_code( B.get_code_full(algo_file, **args),
     [ B.override_state, state ],
+# %% there should 3 such filter, where is the last? typo?
     B.drop_last_output,
     B.drop_last_output
 )

@@ -11,7 +11,7 @@ import bytecode_main as B
 import output_c as O
 # import output_c_sse as O
 
-args = U.parse_args()
+# args = U.parse_args()
 
 c_template = 'raw'
 algo_file = 'sha256'
@@ -21,10 +21,11 @@ c_code = U.load_code_template(c_template)
 size = 4
 endianity = 'be'
 
+args = {}
 args['args'] = { 'size': size }
 
-O.apply_size(size)
-O.apply_endianity(endianity)
+# O.apply_size(size)
+# O.apply_endianity(endianity)
 
 bs_size = 64
 O.apply_bs_size(bs_size)
@@ -82,7 +83,9 @@ U.setup_vars(vs)
 
 interleave = 1
 
-B.global_vars['batch_size'] = 20
+# B.global_vars['batch_size'] = 20
+# B.global_vars['batch_size'] = 16
+B.global_vars['batch_size'] = 1
 
 reverse_num = 7
 
@@ -90,6 +93,43 @@ B.global_vars['interleave'] = interleave
 B.global_vars['reverse_num'] =  reverse_num
 
 B.global_vars['vectorize'] = 1
+
+# d = B.thread_code( B.get_code_full(algo_file, **args),
+#     B.replace_state_with_const,
+#     [ B.unroll_cycle_const_range, 'setupW' ],
+#     [ B.unroll_cycle_const_range, 'main' ],
+#     [ B.unpack_const_subscripts, 'k' ],
+#     B.remove_assignments,
+#     # [ B.dump, 'before.bytecode' ],
+#     [ B.compute_const_expressions, size ],
+#     B.drop_arrays,
+#     B.drop_print,
+#     [ B.compute_const_expressions, size ],
+#     B.bitslice,
+#     [ B.dump, 'test.bytecode' ],
+#     [ B.interpret,
+#       [ 0x65706978, 0x6f697080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000038 ],
+#       [ 0x71c3f65d, 0x17745f05, 0x235570f1, 0x799d75e6, 0x9795d469, 0xd9fcb83e, 0x326f82f1, 0xafa80dea ]],
+#     B.my_exit,
+# )
+
+# # Print bitslice and exit.
+# d = B.thread_code( B.get_code_full(algo_file, **args),
+#     B.replace_state_with_const,
+#     [ B.unroll_cycle_const_range, 'setupW' ],
+#     [ B.unroll_cycle_const_range, 'main' ],
+#     [ B.unpack_const_subscripts, 'k' ],
+#     B.remove_assignments,
+#     # [ B.dump, 'before.bytecode' ],
+#     [ B.compute_const_expressions, size ],
+#     B.drop_arrays,
+#     B.drop_print,
+#     [ B.compute_const_expressions, size ],
+#     [ B.bitslice, size ],
+#     B.drop_unused,
+#     [ B.dump, 'sha256bs.bytecode' ]
+# )
+# exit(1)
 
 d = B.thread_code( B.get_code_full(algo_file, **args),
     B.replace_state_with_const,
@@ -102,7 +142,7 @@ d = B.thread_code( B.get_code_full(algo_file, **args),
     [ B.unroll_cycle_const_range, 'main' ],
     [ B.unpack_const_subscripts, 'k' ],
     B.remove_assignments,
-    B.compute_const_expressions,
+    [ B.compute_const_expressions, size ],
 
     # B.drop_print,
 
@@ -112,6 +152,12 @@ d = B.thread_code( B.get_code_full(algo_file, **args),
     # [ B.reverse_ops, reverse_num ],
     [ B.no_reverse, reverse_num ],
 )
+
+# # asm
+# d = B.thread_code( B.get_code_full('sha256_registers3', **args),
+#     [ B.dump, 'all.bytecode' ],
+#     [ B.no_reverse, reverse_num ],
+# )
 
 reverse = d['reverse']
 code = d['code']
@@ -128,6 +174,21 @@ scalar_str = B.thread_code( scalar,
     [ O.gen_to_str, '$code', args ]
 )
 B.global_vars['scalar'] = scalar_str
+
+# # asm
+# b.thread_code( code,
+#     # B.reuse_variables,
+#     B.vectorize,
+#     [ B.dump, 'vector.bytecode' ],
+#     # B.to_asm,
+#     # B.put_asm_borders,
+#     [ B.dump, 'asm.bytecode' ],
+#     # [ B.unroll_cycle_const_range, 'setupW' ],
+#     # [ B.unroll_cycle_const_range_partly, 'main', 2 ],
+#     [ B.interleave, interleave ],
+#     [ B.dump, 'code.bytecode' ],
+#     [ O.gen, c_code, args, B.global_vars ]
+# )
 
 B.thread_code( code,
     # B.reuse_variables,

@@ -1,43 +1,66 @@
 # -*- coding: utf-8 -*-
 # библиотека для работы с "байткодом"
 
-# Copyright © 2015 Aleksey Cherepanov <lyosha@openwall.com>
+# Copyright © 2015,2016 Aleksey Cherepanov <lyosha@openwall.com>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted.
 
 # %% clean imports
-import sys
-import os
-import re
 import pickle
+import glob
+from copy import deepcopy
+import hashlib
 
-import random
-# RNG = random.SystemRandom()
+import lang_main as L
 
-from lang_spec import instructions
+# import random
+# # RNG = random.SystemRandom()
 
-# http://stackoverflow.com/questions/967443/python-module-to-shellquote-unshellquote
-try:
-    from shlex import quote
-except ImportError:
-    from pipes import quote
+from util_main import *
+
+from bytecode_util import *
 
 global_vars = {}
 
-def get_code(name, use_tracer, use_bitslice, args={}):
+output_delimiter = "END OF DEBUG OUTPUT"
+
+def get_code(name, args={}, temp_file=None):
     # %% needs a patched trace.py that outputs to stderr, may bypass
     # it prefixing bytecode lines to distinguish them from tracer's
     # output
     # %% capture output of tracer
-    args_str = quote(pickle.dumps(args))
+    args_str = shell_quote(pickle.dumps(args))
     decor = ("#" * 15) + " {0} " + ("#" * 15)
-    tracer_options = '-m trace --ignore-dir=/usr -t'
+    # %% tracer is not exposed as option.
+    use_tracer = False
+    if use_tracer:
+        tracer_options = '-m trace --ignore-dir=/usr -t'
+    else:
+        tracer_options = ''
     print >> sys.stderr, decor.format('BEGIN OF {0}'.format(name))
     # %% remove temporary file and `cat`, or make as an option for debug
-    pipe = os.popen('python {1} ../john-devkit-dirty/lang_main.py < ../john-devkit-dirty/algo_{0}.py {3} > {0}.bytecode && cat {0}.bytecode'.format(name, tracer_options if use_tracer else '', '_bs' if use_bitslice else '', args_str))
-    output = pipe.read()
-    print >> sys.stderr, decor.format('END OF {0}'.format(name))
+    file_name = get_dk_path("algo_{0}.py".format(name))
+    if temp_file != None:
+        file_name = temp_file
+    lang_main = get_dk_path('lang_main.py')
+    # %% quoting?
+    # %% option to choose between pypy and regular python
+    # pipe = os.popen('pypy {1} {4} < {3} {2} > {0}.bytecode && cat {0}.bytecode'.format(name, tracer_options, args_str, file_name, lang_main))
+    pipe = os.popen('pypy {1} {4} < {3} {2}'.format(name, tracer_options, args_str, file_name, lang_main))
+    debug = True
+    output = ''
+    for l in pipe:
+        l = l.rstrip('\n')
+        # print '--', debug, l
+        if l == output_delimiter:
+            debug = False
+        elif debug:
+            print '>', l
+        else:
+            output += l + '\n'
+    # output = pipe.read()
+    print >> sys.stderr, decor.format('  END OF {0}'.format(name))
     c = pipe.close()
     if c and c > 0:
         # print >> sys.stderr, "hi there << {0}".format(c)
@@ -45,24 +68,60 @@ def get_code(name, use_tracer, use_bitslice, args={}):
         exit(1)
     return output
 
-def get_code_full(name, use_tracer, use_bitslice, args={}):
-    temp = get_code(name, use_tracer, use_bitslice, args)
+def evaluate(code_str):
+    with open('temp.dkpy', 'w') as f:
+        f.write(code_str)
+    r_str = get_code('temp', {}, 'temp.dkpy')
+    code = split_bytecode(r_str)
+    return code
+
+# %% rename it into get_code() ?
+def get_code_full(name, args={}):
+    temp = get_code(name, args)
     temp = split_bytecode(temp)
     add_prefix(temp, name)
     return temp
 
+def get_hfun_code(name, args={}):
+    temp = get_code_full('hfun_' + name, args)
+    return temp
+
 # режем код на части
 def split_bytecode(c):
+    # %% use c.splitlines() instead of c.split('\n') ?
     return [l.split(' ') for l in c.split('\n') if l != '']
 
 def print_bytecode(c):
     print "\n".join(" ".join(l) for l in c)
+
+# def slurp_bytecode(fname):
+#     return split_bytecode(slurp_file(fname))
+
+# def slurp_bytecode(fname):
+#     r = []
+#     with open(fname, 'r') as f:
+#         for line in f:
+#             r.append(line.rstrip('\n').split(' '))
+#     return r
+
+# import fileinput
+# def slurp_bytecode(fname):
+#     r = []
+#     for line in fileinput.input([fname]):
+#         r.append(line.rstrip('\n').split(' '))
+#     return r
+
+def slurp_bytecode(fname):
+    with open(fname, 'r') as f:
+        return [l.rstrip('\n').split(' ') for l in f if l != '']
 
 # мы можем сливать, заменяя или давая новые определения;
 # при слиянии у нас будут конфликты имён, хорошо бы к именам добавлять
 # префиксы
 # %% автоматом давать префиксы при загрузке байткода?
 def add_prefix(c, prefix):
+    # Заменяем "-" на "_" в префиксе, чтобы не было проблем с си
+    prefix = prefix.replace('-', "_")
     # %% сделать так: заносить в хеш имена от операций, описывающих переменные
     # положимся на то, что все имена имеют форму
     # var\d+
@@ -74,6 +133,7 @@ def add_prefix(c, prefix):
         for i in range(len(l)):
             if re.match('(var)\d+$', l[i]):
                 l[i] = prefix + "_" + l[i]
+
 # %% предполагаем, что нет конфликтов имён
 # может менять параметры
 # %% drop line - неплохое имя, так как разбивка по пробелам
@@ -82,6 +142,7 @@ def add_prefix(c, prefix):
 drop = '>>>>>   drop line <<<<<<<<           '
 def clean(code):
     return [l for l in code if l[0] != drop]
+
 def join_parts(a, b):
     # заменяем именами выходов входы во втором коде
     names = {}
@@ -105,13 +166,23 @@ def join_parts(a, b):
     # %% проверка, что все имена использованы
     return clean(a)
 
-def dump(code, filename):
+def dump_with_file_object(code, f):
+    for l in code:
+        # Мы всё приводим к строкам
+        # %% хорошо бы проверять, что мы получили строку или число
+        f.write(" ".join(l))
+        f.write("\n")
+
+def dump(code, filename = None):
+    if filename == None:
+        print '  Dump to stdout:'
+        print
+        dump_with_file_object(code, sys.stdout)
+        print
+        print '  End of dump'
+        return code
     with file(filename, 'w') as f:
-        for i in code:
-            # Мы всё приводим к строкам
-            # %% хорошо бы проверять, что мы получили строку или число
-            f.write(" ".join(i))
-            f.write("\n")
+        dump_with_file_object(code, f)
     return code
 
 
@@ -126,7 +197,6 @@ new_array
 output
 input
 check_output
-get_from_key_0x80_padding_length
 
 __add__
 __sub__
@@ -151,8 +221,6 @@ __mod__
 ror
 rol
 
-# get_length
-
 # cycle_const_range
 # cycle_range
 # cycle_while_begin
@@ -162,33 +230,23 @@ rol
 # label
 # goto
 
-# digest_to_string
-# fill_string
-
 # if_condition
 # if_else
 # if_end
 
-# init
-# update
-# final
-
-# put0x80
-# get_int
-# get_int_raw
-# put_int
-
-# string_copy_and_extend
-# free
-
 set_item
 make_array
 
-print_buf
 print_var
-print_digest
 
 swap_to_be
+
+permute
+new_array
+sbox
+
+load
+store
 
 '''
 
@@ -215,19 +273,48 @@ def collect_tree(code):
     return r
 
 # функция, вычисляющая константные выражения
-def compute_const_expressions(code):
+def compute_const_expressions(code, size):
+    bits = size * 8
     consts = {}
     for l in code:
         if l[0] == 'new_const':
             consts[l[1]] = l[2]
     # %% вообще, это можно было бы делать в один проход
     new_code = []
+    def run_op_on_consts(op_fun, *args):
+        return str(op_fun(*[int(consts[a]) for a in args]))
+    max_int = 2 ** bits
+    mask_int = max_int - 1
+    def d_rol(a, b):
+        print >> sys.stderr, 'rol:', a, b
+        return (a >> b) | ((a << (bits - b)) & mask_int)
+    ops = {
+        # %% wrap negative?
+        '__sub__': lambda a, b: a - b,
+        '__and__': lambda a, b: a & b,
+        '__xor__': lambda a, b: a ^ b,
+        '__invert__': lambda a: mask_int ^ a,
+        'ror': lambda a, b: (a >> b) | ((a << (bits - b)) & mask_int),
+        'rol': lambda a, b: ((a << b) & mask_int) | (a >> (bits - b)),
+        # 'rol': d_rol,
+        '__add__': lambda a, b: (a + b) & mask_int,
+        '__rshift__': lambda a, b: (a >> b)
+    }
     for l in code:
-        if l[0] == '__sub__' and l[2] in consts and l[3] in consts:
-            l[0] = 'new_const'
-            l[2] = str(int(consts[l[2]]) - int(consts[l[3]]))
-            del l[3]
-            new_code.append(l)
+        if instructions[l[0]].return_type != 'void' and ((len(instructions[l[0]].args) == 2 and l[2] in consts and l[3] in consts) or (len(instructions[l[0]].args) == 1 and l[2] in consts)):
+            if l[0] in ops:
+                # print >> sys.stderr, l
+                # print >> sys.stderr, [consts[a] for a in l[2:]]
+                # print >> sys.stderr, size
+                l[2] = run_op_on_consts(ops[l[0]], *l[2:])
+                if len(instructions[l[0]].args) == 2:
+                    del l[3]
+                l[0] = 'new_const'
+                new_code.append(l)
+                consts[l[1]] = l[2]
+            else:
+                print >> sys.stderr, "Warning: consts with op: ", l[0]
+                new_code.append(l)
         else:
             new_code.append(l)
     return new_code
@@ -290,25 +377,10 @@ def vectorize(code):
             # можно удалить; собственно, могу сделать обрезание
             # неиспользуемых переменных
             # %% надо сделать такую проверку
-            if n:
-                n[0] = drop
+            # if n:
+            #     n[0] = drop
     code = clean(code)
     return code
-
-class BGlobal():
-    pass
-g = BGlobal()
-g.const_count = 0
-
-def new_const(value):
-    g.const_count += 1
-    n = 'bconst_var' + str(g.const_count)
-    return ['new_const', n, str(value)]
-
-def new_name():
-    g.const_count += 1
-    n = 'b_var' + str(g.const_count)
-    return n
 
 def unroll_cycle_const_range_partly(code, label, unroll_size):
     # %% copy-pasted... extract common part with unroll_cycle_const_range
@@ -527,26 +599,81 @@ def remove_assignments(code):
             l[0] = drop
     return clean(code)
 
-def deep_copy(code):
-    return list(list(l) for l in code)
+# def deep_copy(code, to_str = False):
+#     t = type(code)
+#     if t == dict:
+#         r = {}
+#         for k in code:
+#             r[k] = deep_copy(code[k], to_str)
+#     elif t == list:
+#         r = []
+#         for k in code:
+#             r.append(deep_copy(k, to_str))
+#     else:
+#         r = code
+#         # %% нужна проверка, что там только числа и строки
+#         if to_str:
+#             r = str(r)
+#     return r
+
+# def deep_copy(code, to_str = False):
+#     return code
+
+def deep_copy_str(code):
+    t = type(code)
+    if t == dict:
+        r = {}
+        for k, v in code.iteritems():
+            r[k] = deep_copy_str(v)
+    elif t == list:
+        r = map(deep_copy_str, code)
+    else:
+        # %% нужна проверка, что там только числа и строки
+        r = str(code)
+    return r
+
+def deep_copy_nostr(code):
+    t = type(code)
+    if t == dict:
+        r = {}
+        for k, v in code.iteritems():
+            r[k] = deep_copy_nostr(v)
+    elif t == list:
+        r = map(deep_copy_nostr, code)
+    else:
+        r = code
+        # return code
+    return r
+
+def deep_copy(code, to_str = False):
+    r = None
+    if to_str:
+        r = deep_copy_str(code)
+    else:
+        r = deep_copy_nostr(code)
+    return r
+
+# # функция замены всех частей на строки
+# def alltostr(code):
+#     r = code
+#     packs = [code]
+#     if type(code) == dict:
+#         packs = code.values()
+#     # Заменяем на месте
+#     for p in packs:
+#         # deep copy each pack (code object)
+#         p = deep_copy(p)
+#         for l in p:
+#             # print >> sys.stderr, l
+#             for i in range(len(l)):
+#                 # %% нужна проверка, что там только числа и строки
+#                 l[i] = str(l[i])
+#             # print >> sys.stderr, l
+#     return r
 
 # функция замены всех частей на строки
 def alltostr(code):
-    r = code
-    packs = [code]
-    if type(code) == dict:
-        packs = code.values()
-    # Заменяем на месте
-    for p in packs:
-        # deep copy each pack (code object)
-        p = deep_copy(p)
-        for l in p:
-            # print >> sys.stderr, l
-            for i in range(len(l)):
-                # %% нужна проверка, что там только числа и строки
-                l[i] = str(l[i])
-            # print >> sys.stderr, l
-    return r
+    return deep_copy(code, True)
 
 # It's like -> in clojure and dash.el. It is not as elegant as macro
 # in lisp but is fine too. Example of usage:
@@ -585,21 +712,22 @@ def thread_first(what, *forms):
 #  % словарь, мы можем совмещать, а можем вкладывать
 def thread_code(what, *forms):
     res = what
+    res = deep_copy(res)
     for f in forms:
         # Если не список и не кортеж, то это bare function,
         # оборачиваем в список.
         if type(f) != list and type(f) != tuple:
             f = [f,]
         print >> sys.stderr, f[0]
+        # if f[0] == dump:
+        #     for r in res:
+        #         print >> sys.stderr, r
+        res = f[0](res, *f[1:])
         # После каждого прохода заменяем всё на строки
         # %% Это такой глобальный костыль, чтобы можно сохранять числа
         #  % в массив
         # %% Это должно быть медленно
-        res = deep_copy(res)
-        res = f[0](res, *f[1:])
         res = alltostr(res)
-        # Если получили словарь и наш словарь - словарь по
-        # умолчанию, то мы замещаем словарь на новый.
     return res
 
 def use_define_for_some(code):
@@ -756,6 +884,80 @@ def replace_state_with_const(code):
         replace_in_line(l, rs)
     return clean(code)
 
+def replace_state_with_vars(code, new_vars):
+    rs = {}
+    for l in code:
+        if l[0] == 'new_state_var':
+            rs[l[1]] = new_vars.pop(0)
+            l[0] = drop
+        replace_in_line(l, rs)
+    return clean(code)
+
+def replace_inputs_with_consts(code, new_consts):
+    # %% rs тут не нужен
+    rs = {}
+    for l in code:
+        if l[0] == 'input':
+            c = new_consts.pop(0)
+            n = new_name()
+            rs[l[1]] = n
+            # мы заменяем операцию на создание константы
+            l[0] = 'new_const'
+            l[1] = n
+            assert len(l) == 2
+            l.append(c)
+        replace_in_line(l, rs)
+    return code
+
+def replace_length_with_const(code, new_value):
+    for l in code:
+        if l[0] == 'input_length':
+            c = new_value
+            # мы заменяем операцию на создание константы
+            l[0] = 'new_const'
+            assert len(l) == 2
+            l.append(c)
+    return code
+
+def apply_replacements(code, rs):
+    for l in code:
+        for i in range(len(l)):
+            if l[i] in rs:
+                l[i] = rs[l[i]]
+    return code
+
+def drop_outputs(code):
+    for l in code:
+        if l[0] == 'output':
+            l[0] = drop
+    return clean(code)
+
+def connect_inputs_outputs(*code_blocks):
+    nc = []
+    for code in code_blocks:
+        code = deep_copy(code)
+        rename_uniquely(code)
+        nc.append(code)
+    def collect_lines(code, what):
+        return filter(lambda l: l[0] == what, code)
+    main_code = nc.pop(0)
+    main_outputs = collect_lines(main_code, 'output')
+    for code in nc:
+        inputs = collect_lines(code, 'input')
+        rs = {}
+        # print >> sys.stderr, len(main_outputs), len(inputs)
+        assert len(main_outputs) == len(inputs)
+        for l_out, l_in in zip(main_outputs, inputs):
+            rs[l_in[1]] = l_out[1]
+            l_in[0] = drop
+            l_out[0] = drop
+        apply_replacements(code, rs)
+        # for l in main_outputs + inputs:
+        #     l[0] = drop
+        main_outputs = collect_lines(code, 'output')
+        main_code += code
+    return clean(main_code)
+
 def interleave(code, number):
     assert type(number) == int
     # assert number > 1
@@ -790,6 +992,8 @@ def interleave(code, number):
             #  % used)
             for n in l[2:]:
                 to_save[n] = 1
+        if l[0] == 'var_setup':
+            saved_code.append(l)
         if instructions[l[0]].return_type != 'void' and l[1] in to_save or l[0] in ['v_new_array', 'print_verbatim']:
             if l[0] in ['v_new_array', 'print_verbatim']:
                 to_save[l[1]] = 1
@@ -977,7 +1181,10 @@ def replace_new_array(code):
             new_code.append(l)
     return new_code
 
-def bitslice(code, bs_bits, size):
+# %% это надо слить с новым так, чтобы было управление тем, какие
+#  % массивы раскрывать, а какие нет
+# %% bs_bits тут не нужен
+def bitslice_old(code, bs_bits, size):
     # %% надо бы сделать поддержку new_array, чтобы не раскрывать
     code = replace_new_array(code)
     # for l in code
@@ -1117,8 +1324,8 @@ def bitslice(code, bs_bits, size):
                             for i in [bits] * 5]
             # r - result bit
             # n - carry bit
-            for i in reversed(range(bs_bits)):
-                if i == bs_bits - 1:
+            for i in reversed(range(bits)):
+                if i == bits - 1:
                     op(r[i], a[i], 'xor', b[i])
                     op(n[i], a[i], 'and', b[i])
                 else:
@@ -1162,6 +1369,49 @@ def bitslice(code, bs_bits, size):
         else:
             # operation that should not be bitsliced, pass as is
             new_code.append(l)
+    return new_code
+
+def sbox_table_hash_hex(table):
+    table_string = '_'.join(str(i) for i in table)
+    h = hashlib.new('sha256')
+    h.update(table_string)
+    table_hash = h.hexdigest()
+    return table_hash
+
+def bs_pick_sbox(table):
+    # По таблице возвращаем схему для интеграции в общий circuit,
+    # количество входных битов, количество выходных битов.
+    name = "_".join(str(i) for i in table)
+    # We pick the first one
+    # %% allow user to chose sbox
+    files = glob.glob("sboxes/" + name + ".*")
+    if len(files) != 0:
+        fname = files[0]
+    else:
+        h = sbox_table_hash_hex(table)
+        fname = glob.glob("sboxes/" + h + ".*")[0]
+    code = slurp_bytecode(fname)
+    counts = count_instructions(code)
+    # %% get number either from code or from file name
+    return code, counts['input'], counts['output']
+
+def bs_swap_bytes(a, size):
+    # return a
+    bits = []
+    for i in reversed(range(size)):
+        bits += a[i * 8 : i * 8 + 8]
+    return bits
+
+def expand_bs_andnot(code):
+    # r = a `andnot` b  =>  r = a & ~b
+    new_code = []
+    for l in code:
+        if l[0] == 'bs_andnot':
+            n = new_name()
+            new_code.append(['bs_invert', n, l[3]])
+            l[3] = n
+            l[0] = 'bs_and'
+        new_code.append(l)
     return new_code
 
 # Функция для исследования возможности реверса
@@ -1309,11 +1559,15 @@ def no_reverse(code, output_number):
         ['output', 'r1']]
     # Записываем выходы
     outputs_array = []
+    last_vs = None
     for l in code:
+        if l[0] == 'var_setup':
+            last_vs = l
         if l[0] == 'output':
             outputs_array.append(l[1])
     code.append(['check_output', outputs_array[output_number]])
-    return { 'code': code, 'reverse': reverse_code }
+    assert last_vs != None
+    return { 'code': code, 'reverse': [last_vs] + reverse_code }
 
 # Функция для реверса операций (+, ^, swap_to_be)
 # Реверсит только 1 инт, на него ставит check_output инструкцию,
@@ -1534,6 +1788,9 @@ def drop_print(code):
 def override_state(code, state):
     consts = {}
     for l in code:
+        # We collect lists with constants and then override constants
+        # when we meet state variables.
+        # ** It assumes that merging of constants is disabled.
         if l[0] == 'new_const':
             consts[l[1]] = l
         if l[0] == 'new_state_var':
@@ -1552,3 +1809,1243 @@ def drop_last_output(code):
             if outputs == k:
                 l[0] = drop
     return clean(code)
+
+# %% it is reused for regular code, not sure if bitslice is needed yet
+def split_bitslice(code, size, regular = False):
+    # Мы разбиваем код на части
+    # %% assignment, cycles are prohibited
+    part1 = []
+    part2 = []
+    p1names = {}
+    k = 0
+    # %% если мы в половине встретили выход, то нам его надо
+    #  % пробросить дальше, либо мне нужна инструкция для
+    #  % промежуточных выходов, либо не надо добавлять в первую часть,
+    #  % вторая часть подхватит это
+    last_var_setup = None
+    for l in code:
+        if k < size:
+            # До заданного размера мы всё сохраняем
+            part1.append(l)
+            # Запоминаем имена, описанные в первой части
+            if instructions[l[0]].return_type != 'void':
+                p1names[l[1]] = 1
+            if l[0] == 'var_setup':
+                last_var_setup = l
+        else:
+            if k == size:
+                part2.append(last_var_setup)
+            # Если аргумент встречался, то на этой точке мы добавляем
+            # выход из первой части и вход во второй.
+            for n in l[1:]:
+                if n in p1names:
+                    # "ignored" is a number of bit, we don't care here
+                    if regular:
+                        part1.append(["output", n])
+                        part2.append(["input", n])
+                    else:
+                        part1.append(["bs_output", n, "ignored"])
+                        part2.append(["bs_input", n, "ignored"])
+                    del p1names[n]
+            part2.append(l)
+        k += 1
+    return part1, part2
+
+def split_at(code, where):
+    places = filter(lambda l: l[0] == 'may_split_here' and l[1] == where, code)
+    assert len(places) == 1
+    # print >> sys.stderr, code.index(places[0])
+    pos = code.index(places[0])
+    return split_bitslice(code, pos, True)
+
+def drop_arrays(code):
+    # %% работает после compute_const_expressions
+    # %% надо проверять, где можно убрать операции, а где нет
+    new_code = []
+    consts = {}
+    arrays = {}
+    substs = {}
+    for l in code:
+        for i in range(len(l)):
+            if l[i] in substs:
+                l[i] = substs[l[i]]
+        if l[0] == 'new_const':
+            consts[l[1]] = l[2]
+        if l[0] == 'set_item':
+            # We fail on non-const subscripts.
+            # %% It needs constant subexpression computations.
+            assert l[2] in consts
+            arrays[l[1]][consts[l[2]]] = l[3]
+        elif l[0] == '__getitem__':
+            substs[l[1]] = arrays[l[2]][consts[l[3]]]
+        elif l[0] == 'make_array':
+            arrays[l[1]] = {}
+        else:
+            new_code.append(l)
+    return new_code
+
+# def drop_unused(code):
+#     used = {}
+#     new_code = []
+#     for l in code:
+#         try:
+#             instructions[l[0]]
+#         except Exception:
+#             print >> sys.stderr, l
+#         ii = instructions[l[0]]
+#         # Если void, то все аргументы надо отметить
+#         for e in l[2 - (ii.return_type == 'void'):]:
+#             # if e not in used:
+#             #     used[e] = 0
+#             # used[e] += 1
+#             used[e] = 1
+#     print >> sys.stderr, ">>>", 'b_var7331' in used
+#     for l in code:
+#         ii = instructions[l[0]]
+#         # if ii.return_type == 'void' or (ii.return_type != 'void' and used[l[1]] > 1):
+#         if ii.return_type == 'void' or (ii.return_type != 'void' and l[1] in used):
+#         # if ii.return_type == 'void' or l[1] in used:
+#             new_code.append(l)
+#     return new_code
+
+def drop_unused(code):
+    used = {}
+    r_new_code = []
+    for l in reversed(code):
+        try:
+            ii = instructions[l[0]]
+        except Exception:
+            print >> sys.stderr, l
+            raise
+        # %% надо бы проверять, что цикл не пустой
+        if ii.return_type == 'void' or (ii.return_type != 'void' and l[1] in used) or l[0].startswith('cycle_'):
+            # Если инструкции не возвращает ничего, то это побочный
+            # эффект, она нам нужна.
+            # %% Присваивания в массив не возвращают, но могут быть не
+            #  % нужны.
+            # Или инструкция нужна, если она возвращает значение,
+            # которое используется.
+            r_new_code.append(l)
+            # Если void, то все аргументы надо отметить, как используемые
+            for e in l[2 - (ii.return_type == 'void'):]:
+                used[e] = 1
+    return list(reversed(r_new_code))
+
+def gen_asm(code):
+    # количество регистров
+    rk = 32
+    # индексы регистров
+    ris = list(range(rk))
+    # состояние регистров
+    registers = ([None] * rk)
+    consts = {}
+    asm = []
+    for li in range(len(code)):
+        l = code[li]
+        # Очищаем регистры: если значение больше не будет
+        # использоваться, то выкидываем регистр.
+        for ri in ris:
+            r = registers[ri]
+            f = True
+            for l2 in code[li:]:
+                for e in l2[1:]:
+                    if e == r:
+                        f = False
+            if f:
+                registers[ri] = None
+        if l[0] == 'label':
+            asm.append(l)
+            continue
+        # %% у нас, вроде, не должно быть побочных эффектов, на всяких
+        #  % случай; кроме, label
+        assert l[0] == 'output' or instructions[l[0]].return_type != 'void'
+        # обрабатываем новый код
+        if l[0] == 'new_const':
+            consts[l[1]] = l[2]
+        elif l[0] == 'input':
+            # Размещение входов в регистрах - за пределами
+            # генерируемого кода.
+            # Кладём в первый свободный регистр.
+            if None in registers:
+                i = registers.index(None)
+                registers[i] = l[1]
+            else:
+                die("can't find free register for input")
+        else:
+            # Если на регистр среди аргументов текущей операции 1
+            # ссылка, то можно использовать этот регистр в качестве
+            # целевого, иначе надо копировать значение.
+            i = None
+            for e in l[2:]:
+                # есть элемент, есть регистр; аргументы могут быть
+                # константами, тогда их не будет в регистре
+                if e not in consts:
+                    ti = registers.index(e)
+                    # ti - индекс регистра с возможным аргументом,
+                    # теперь надо убедиться, что на него больше нет
+                    # ссылок
+                    for l2 in code[li + 1 :]:
+                        if e in l2:
+                            break
+                    else:
+                        # Если мы не нашли других ссылок на значение,
+                        # то мы его заменим.
+                        i = ti
+                        break
+            if i == None:
+                # Если мы не нашли регистр, который можем использовать, как
+                # целевой, то мы копируем в неиспользуемый регистр.
+                i = registers.index(None)
+                # Мы копируем не константу. Для этого надо найти
+                # регистр.
+                for e in l[2:]:
+                    if e not in consts:
+                        arg_i = registers.index(e)
+                        break
+                asm.append(['copy', 'r' + str(i), 'r' + str(arg_i)])
+                registers[i] = registers[arg_i]
+            # i - номер целевого регистра для инструкции;
+            # registers[i] - имя переменной одного из аргументов,
+            # остальные аргументы должны добавлены в инструкцию
+            args = []
+            for e in l[2:]:
+                # %% всё это не учитывает порядок аргументов.
+                if e != registers[i]:
+                    if e in consts:
+                        # Мы добавляем константы явно
+                        args.append(consts[e])
+                    else:
+                        # Если аргумент - не константа, то мы
+                        # добавляем регистр по номеру.
+                        args.append('r' + str(registers.index(e)))
+            asm.append([l[0], 'r' + str(i)] + args)
+            registers[i] = l[1]
+    return asm
+
+# пока по-простому: операция+присвоение -> инструкция
+def to_asm(code):
+    last_op = None
+    last_op2 = None
+    vars = {}
+    new_code = []
+    v_consts = {}
+    consts = {}
+    for l in code:
+        # заменяем на in-place операции:
+        #   v_invert t a
+        #   v___floordiv__ a t
+        # становится
+        #   a_v_invert a
+        # так как переменные используются только временно, то их мы
+        # просто устраняем, ничего переименовывать не надо
+
+        # if last_op2 != last_op:
+        #     print >> sys.stderr, "    remembered op changed ===============>"
+        #     print >> sys.stderr, "    ", last_op
+        #     last_op2 = last_op
+        # print >> sys.stderr, l
+
+        if instructions[l[0]].return_type != 'void':
+            vars[l[1]] = 'temporary'
+
+        if l[0] == 'v_new_const':
+            v_consts[l[1]] = l[2]
+            # %% надо проверять, что эта константа используется из ассемблера
+            l[0] = 'a_' + l[0]
+            new_code.append(l)
+        elif l[0] == 'new_const':
+            consts[l[1]] = l[2]
+            # %% надо проверять, что эта константа используется из ассемблера
+            l[0] = 'a_' + l[0]
+            new_code.append(l)
+        elif l[0] == 'use_define':
+            new_code.append(l)
+        elif l[0] == 'v_new_var':
+            # Default is memory.
+            vars[l[1]] = 'memory'
+        elif l[0] == 'in_memory':
+            assert vars[l[1]] != 'register'
+            vars[l[1]] = 'memory'
+        elif l[0] == 'in_register':
+            # %% хм, мы по умолчанию memory записали... можно сделать
+            #  % неизвестный типа памяти
+            # assert l[1] not in vars
+            assert vars[l[1]] != 'register'
+            vars[l[1]] = 'register'
+        elif l[0] == 'v_input':
+            new_code.append(l)
+        elif l[0] == 'v_output':
+            # new_code.append(['a_v_output', l[1]])
+            new_code.append(l)
+        elif l[0] == 'v_store':
+            new_code.append(['a_v_store', l[1], l[2]])
+        elif l[0] == 'v_print_var':
+            l[0] = 'a_' + l[0]
+            new_code.append(l)
+        elif l[0] == 'v_load':
+            assert last_op == None
+            last_op = l
+            # new_code.append(['a_v_load', l[1], l[2]])
+        else:
+
+            # проверяем, с чем работает инструкция: с переменными или
+            # с регистрами; смешанный случай - ошибка; бывают
+            # константы
+            rk = 0
+            mk = 0
+            tk = 0
+            # if instructions[l[0]].return_type == 'void':
+            #     args = l[1:]
+            # else:
+            #     args = l[2:]
+            args = l[1:]
+            for e in args:
+                if e in vars:
+                    if vars[e] == 'register':
+                        rk += 1
+                    elif vars[e] == 'memory':
+                        mk += 1
+                    elif vars[e] == 'temporary':
+                        tk += 1
+                    else:
+                        die('unimplemented')
+            assert mk == 0 or rk == 0
+            assert not (l[0] == 'v___floordiv__' and vars[l[1]] == 'register' and vars[l[2]] == 'memory')
+            assert not (l[0] == 'v___floordiv__' and vars[l[1]] == 'memory' and vars[l[2]] == 'register')
+
+            if l[0] == 'v___floordiv__' and vars[l[1]] == 'register' and vars[l[2]] == 'temporary':
+                # print >> sys.stderr, 1
+                if l[2] not in v_consts and l[2] not in consts:
+                    assert last_op != None
+                    # %% мы рассчитываем на то, что у операций подряд будет
+                    #  % одна переменная
+                    assert last_op[1] == l[2]
+                    if last_op[0] == 'v_load':
+                        # v_load becomes the op, not assignment
+                        l[0] = 'a_v_load'
+                        args = [l[1], last_op[2]]
+                    elif last_op[0] == 'v_invert':
+                        # v_invert becomes the op
+                        l[0] = 'a_v_invert'
+                    elif last_op[2] == l[1]:
+                        args = last_op[2:]
+                    else:
+                        # %% в теории, это не обязано быть таким;
+                        #  % порядок может быть другим
+                        die('wrong bytecode')
+                    # заменяем: в качестве аргументов идут аргументы операции
+                    new_code.append(['a_' + last_op[0]] + args)
+                else:
+                    new_code.append(['a_' + l[0]] + l[1:])
+                last_op = None
+            elif l[0] == 'v___floordiv__' and vars[l[1]] == 'register' and vars[l[2]] == 'register':
+                # print >> sys.stderr, 2
+                l[0] = 'a_' + l[0]
+                new_code.append(l)
+            elif mk == 0 and rk == 0 and tk == 0:
+                # print >> sys.stderr, 3
+                new_code.append(l)
+            elif mk > 0:
+                # print >> sys.stderr, 4
+                # переменная в памяти
+                # %% проверка типа результата, если есть результат
+                new_code.append(l)
+            else:
+            # elif rk > 0:
+                # print >> sys.stderr, 5
+                # переменная в регистре
+                assert last_op == None
+                last_op = l
+
+        # конец обработки
+        if len(new_code) > 0:
+            ll = new_code[-1]
+            if ll[0] == 'a_v___floordiv__' and ll[1] == 'sha256_registers3_var25' and len(ll) == 2:
+                print >> sys.stderr, ">>>>>", ll
+
+    var_defs = []
+    for k, v in vars.iteritems():
+        if v == 'register':
+            var_defs.append(['a_v_new_register', k])
+        elif v == 'memory':
+            # var_defs.append(['v_new_var', k])
+            var_defs.append(['a_v_new_var', k])
+    return var_defs + new_code
+
+def put_asm_borders(code):
+    # %% there are no checks
+    new_code = []
+    asm = False
+    def is_asm(op):
+        return op not in ['a_v_new_register'] and (op.startswith('a_') or op in ['v_new_const', 'new_const', 'use_define'])
+    for l in code:
+        if is_asm(l[0]) and not asm:
+            asm = True
+            new_code.append(['a_begin'])
+        if not is_asm(l[0]) and asm:
+            asm = False
+            new_code.append(['a_end'])
+        new_code.append(l)
+    return new_code
+
+def rename_uniquely(code):
+    rs = {}
+    # dump(code, 'before.bytecode')
+    for l in code:
+        for i in range(1, len(l), 1):
+            # Если элемент не в таблице замен и это не метка, то
+            # запоминаем замену.
+            if l[i] not in rs and instructions[l[0]].all_types[i] != 'label':
+                rs[l[i]] = new_name()
+            # Если элемент в таблице замен, то заменяем его на указанный.
+            if l[i] in rs:
+                l[i] = rs[l[i]]
+    # dump(code, 'after.bytecode')
+    # if 'b_var16356' in rs.values():
+    #     exit(1)
+    return code
+
+def collect_outputs(code):
+    outputs = []
+    for l in code:
+        if l[0] == 'output':
+            outputs.append(l[1])
+    return outputs
+
+def vectorize_maybe(code):
+    if global_vars['vectorize']:
+        return vectorize(code)
+    return code
+
+def my_exit(code):
+    exit(1)
+
+# построение обратного алгоритма (для шифров)
+def reverse_full(code):
+    # %% it is simplistic
+    assert code[0][0] == 'var_setup'
+    # new_code = [code[0]]
+    var_setup = code[0]
+    new_code = []
+    known = set()
+    inputs = []
+    outputs = []
+    for l in code:
+        if l[0] == 'input':
+            inputs.append(l)
+        if l[0] == 'output':
+            outputs.append(l)
+    remains = list(reversed(code[1:]))
+    while len(remains) != 0:
+        for l in remains:
+            if l[0] == 'output':
+                # print 'o', l
+                known.add(l[1])
+                # new_code.append(['input', l[1]])
+                l[0] = drop
+            elif l[0] == 'new_const':
+                # print 'c', l
+                known.add(l[1])
+                new_code.append(list(l))
+                l[0] = drop
+            elif l[0] == 'input' and l[1] in known:
+                # print 'i', l
+                # new_code.append(['output', l[1]])
+                l[0] = drop
+            elif l[0] == 'input' and l[1] not in known:
+                pass
+            elif instructions[l[0]].return_type == 'void':
+                not_implemented()
+            elif instructions[l[0]].return_type != 'void' and all(a in known for a in l[2:]):
+                # print 'fk', l
+                if l[1] in known:
+                    # We skip instruction if the result is already known
+                    # (redundancy)
+                    # %% Это означает, что мы можем выбрать путь, как
+                    #  % получить это значения. Это может влиять на
+                    #  % скорость. (Если, конечно, чистили от дублей.)
+                    print >> sys.stderr, 'warning: redundancy', l
+                else:
+                    # Add it as is
+                    new_code.append(list(l))
+                    known.add(l[1])
+                l[0] = drop
+            elif l[0] not in ['__rshift__', '__lshift__'] and instructions[l[0]].return_type != 'void' and l[1] in known and [a in known for a in l[2:]].count(False) == 1:
+                # %% сдвиги теряют информацию, но не всю, результат
+                #  % обратного сдвига вполне можно использовать
+                #  % частично, но это удобней делать с bitslice
+                #  % реализацией (там это "бесплатно")
+                # print 'nk1', l
+                # строим обратное
+                nk_idx = [a in known for a in l[2:]].index(False)
+                nk = l[nk_idx + 2]
+                k = l[(1 - nk_idx) + 2]
+                if l[0] == '__add__':
+                    new_code.append(['__sub__', nk, l[1], k])
+                elif l[0] == '__xor__':
+                    new_code.append(['__xor__', nk, l[1], k])
+                else:
+                    not_implemented()
+                known.add(nk)
+                l[0] = drop
+            else:
+                # we just postpone because we can't move  forward
+                pass
+        # shrink remaining
+        new_remains = filter(lambda x: x[0] != drop, remains)
+        if len(new_remains) == len(remains):
+            # print
+            # print 'not reversed yet:'
+            # for r in remains:
+            #     print r
+            die("can't reverse")
+        remains = new_remains
+    preamble = [var_setup]
+    for l in outputs:
+        preamble.append(['input'] + l[1:])
+    for l in inputs:
+        new_code.append(['output'] + l[1:])
+    return preamble + new_code
+
+def check_types(code):
+    ms, mt = extract_modules(code)
+    ts = {}
+    for m in ms:
+        # %% можно было бы запоминать тип функции и потом проверять
+        ts[m] = 'function'
+    def tsame(t1, t2):
+        # it is not symmetric: t1 from real instruction, t2 from spec
+        return t1 == t2 or (t1 == 'const_num' and t2 == 'num')
+    for l in code:
+        if l[0] not in instructions:
+            die('not in spec: {0}', l)
+        inst = instructions[l[0]]
+        if inst.return_type == 'void':
+            res = None
+            res_type = None
+            args = l[1:]
+        else:
+            res = l[1]
+            res_type = inst.return_type
+            args = l[2:]
+        if len(args) < len(inst.args):
+            die('op is too short: {0}', l)
+        if len(args) > len(inst.args) and (len(inst.args) == 0 or inst.args[-1][0] != '*'):
+            die('op is too long: {0}', l)
+        i_args = list(inst.args)
+        if len(i_args) > 0:
+            if i_args[-1][0] == '*':
+                t = i_args[-1][1:]
+                i_args[-1] = t
+                while len(args) > len(i_args):
+                    i_args.append(t)
+        for i, a in enumerate(args):
+            if i_args[i] == 'label':
+                continue
+            # проверяем, что у всех аргументов есть типы
+            if a not in ts:
+                die('type was not inferred for {1} in {0}', l, a)
+            # проверяем, что аргументы соответствуют спецификации
+            if ts[a] != i_args[i].lstrip('!') and not tsame(ts[a], i_args[i]):
+                die('type is not right for {1} in {0}, have {3}, expected {2}', l, a, i_args[i], ts[a])
+        # запоминаем тип для результата
+        # %% было бы неплохо запоминать const_num, если операция от const_num
+        ts[res] = res_type
+    return code
+
+# def change_inputs_for_functions(code):
+#     f = 0
+#     for l in code:
+#         if l[0] == 'module_begin':
+#             f += 1
+#         if l[0] == 'module_end':
+#             f -= 1
+#         if f > 0 and (l[0].startswith('input') or l[0].startswith('output')):
+#             l[0] = 'function_' + l[0]
+#     return code
+
+def fix_run_merkle_damgard(code, ifs = None):
+    ifs = collect_ifs(code)
+    # if ifs == None:
+    #     ifs = collect_ifs(code)
+    # m, mt = extract_modules(code)
+    # main_code = m['_main']
+    # for n in m:
+    #     if n == '_main':
+    #         continue
+    #     m[n] = fix_run_merkle_damgard(m[n], ifs)
+    # %% dirty
+    # state = []
+    # consts = {}
+    new_code = []
+    sizes = [None]
+    # const_sizes = {}
+    for l in code:
+        if l[0] == 'var_setup':
+            # %% support var_setup_pop; each module has to have its
+            #  % own stack
+            sizes[-1] = l
+        elif l[0] == 'module_begin':
+            sizes.append(None)
+        elif l[0] == 'module_end':
+            sizes.pop()
+        # elif l[0] == 'new_const':
+        #     consts[l[1]] = l[2]
+        # elif l[0] == 'new_state_var':
+        #     l[0] = 'input_state'
+        #     c = consts[l.pop()]
+        #     state.append(c)
+        #     const_sizes[c] = sizes[-1]
+        elif l[0] == 'run_merkle_damgard':
+            l[0] = 'run_merkle_damgard_with_state'
+            # put zero as offset for MD
+            zero = new_name()
+            new_code.append(['new_const', zero, '0'])
+            l.append(zero)
+            # pops = 0
+            state = map(lambda x: x[1], ifs[l[2]]['state_var_names_values'])
+            for v in state:
+                # if const_sizes[v] != sizes[-1]:
+                #     new_code.append(const_sizes[v])
+                #     pops += 1
+                #     sizes.append(const_sizes[v])
+                l.append(put_const(new_code, v))
+            # for i in range(pops):
+            #     new_code.append(['var_setup_pop'])
+            #     sizes.pop()
+        new_code.append(l)
+    # return pack_modules(new_code, m, mt)
+    return new_code
+
+def compute_hfun_sizes(code):
+    # modules, modules_types = extract_modules(code)
+    # main_code = modules['_main']
+    ifs = collect_ifs(code)
+    new_code = []
+    for l in code:
+        if l[0] == 'hfun_block_size':
+            if l[2] in ifs:
+                l[0] = 'new_const'
+                i = ifs[l[2]]
+                # print i
+                # l[2] = str(i['inputs'] * i['size'])
+                l[2] = str(i['hfun_block_size'])
+            else:
+                die('unknown func {1} in {0}', l, m)
+        if l[0] == 'hfun_digest_size':
+            if l[2] in ifs:
+                l[0] = 'new_const'
+                i = ifs[l[2]]
+                # l[2] = str(i['outputs'] * i['size'])
+                l[2] = str(i['hfun_digest_size'])
+            else:
+                die('unknown func {1} in {0}', l, m)
+        if l[0] == 'invoke_hfun':
+            # ** к 'invoke_fun2' это не применимо (не всегда)
+            l[0] += '_with_size'
+            i = ifs[l[2]]
+            v = new_name()
+            # new_code.append(['new_const', v, str(i['outputs'] * i['size'])])
+            new_code.append(['new_const', v, str(i['hfun_digest_size'])])
+            l.append(v)
+        new_code.append(l)
+    return new_code
+
+def test_modules_packing(code):
+    modules, mt = extract_modules(code)
+    return pack_modules(modules['_main'], modules, mt)
+
+def pack_modules(code, modules, modules_types):
+    new_code = []
+    for k in modules:
+        if k == '_main':
+            continue
+        new_code.append(['module_begin', k] + modules_types[k])
+        new_code += modules[k]
+        new_code.append(['module_end', k])
+    new_code += code
+    return new_code
+
+def flatten_modules(code):
+    # We lift all modules to the top renaming.
+    all_modules, all_modules_types = {}, {}
+    # Очередь объектов кода для вытаскивания модулей
+    modules, modules_types = extract_modules(code)
+    main_code = modules['_main']
+    q = [('_main', code, None)]
+    while len(q) > 0:
+        name, c, t = q.pop()
+        modules, modules_types = extract_modules(c)
+        for m in modules:
+            if m == '_main':
+                continue
+            q.append((m, modules[m], modules_types[m]))
+        assert name not in all_modules
+        all_modules[name] = modules['_main']
+        all_modules_types[name] = t
+    return pack_modules(main_code, all_modules, all_modules_types)
+
+# ** compute_hfun_sizes should be called before
+# ** flatten_modules should be called before
+def inline_function(code, fun_type, name):
+    modules, modules_types = extract_modules(code)
+    main_code = modules['_main']
+    v = None
+    for m, (t, n) in modules_types.items():
+        if t == fun_type and n == name:
+            if v != None:
+                die('multiple definitions for hfun {0}', n)
+            v = m
+    if v == None:
+        die('{0} {1} not found', fun_type, name)
+    m2, mt2 = extract_modules(modules[v])
+    vcode = m2['_main']
+    # lift submodules
+    # del m2['_main']
+    # for k in m2:
+    #     if k in modules:
+    #         die('name collision in submodules')
+    #     modules[k] = m2[k]
+    #     modules_types[k] = mt2[k]
+    # del modules[v]
+    # insert the body
+    new_code = []
+    callers = {
+        'hfun' : [ 'invoke_hfun_with_size', 'invoke_hfun' ],
+        'plain' : [ 'invoke_plain' ],
+    }
+    plain_arrays = {}
+    if fun_type == 'plain':
+        # Collect unpacking of results of 'plain' functions
+        for l in main_code:
+            if l[0] == 'invoke_plain' and v == l[2]:
+                plain_arrays[l[1]] = []
+            elif l[0] == '__getitem__' and l[2] in plain_arrays:
+                # ** We assume indexing to go straight
+                plain_arrays[l[2]].append(l[1])
+    for l in main_code:
+        if l[0] == '__getitem__' and l[2] in plain_arrays:
+            pass
+        elif l[0].startswith('invoke_') and l[2] == v and l[0] in callers[fun_type]:
+            assert l[0] != 'invoke_hfun'
+            output_names = []
+            plain_result_name = None
+            # hfun_result_name = None
+            if l[0] == 'invoke_hfun_with_size':
+                hfun_result_name = l[1]
+                input_key_name = l[3]
+                size_name = l[4]
+            elif l[0] == 'invoke_plain':
+                plain_result_name = l[1]
+                # input and state
+                state_names = l[3:]
+            substs = {}
+            # находим выход и записываем ему имя сразу
+            out_bytes_name = None
+            input_names = []
+            for l2 in vcode:
+                if l2[0] == 'output_bytes':
+                    assert out_bytes_name == None
+                    out_bytes_name = l2[1]
+                    substs[out_bytes_name] = hfun_result_name
+                elif l2[0] == 'output':
+                    output_names.append(l2[1])
+                elif l2[0] == 'input':
+                    c = state_names.pop(0)
+                    input_names.append(c)
+                    substs[l2[1]] = c
+            if fun_type == 'plain':
+                for i, o in enumerate(output_names):
+                    substs[o] = plain_arrays[plain_result_name][i]
+            # вставляем код функции
+            for l2 in vcode:
+                if l2[0] == 'input_key':
+                    # в новом коде, вход - та переменная
+                    substs[l2[1]] = input_key_name
+                elif l2[0] == 'new_state_var':
+                    substs[l2[1]] = state_names.pop(0)
+                elif l2[0] in ['set_hfun_block_size', 'set_hfun_digest_size']:
+                    pass
+                elif l2[0] == 'output_bytes':
+                    # replace_in_code(new_code, { l2[1]: res })
+                    pass
+                elif l2[0] in ['output', 'input']:
+                    pass
+                else:
+                    t = list(l2)
+                    if instructions[l2[0]].return_type != 'void' and l2[1] not in substs:
+                        substs[l2[1]] = new_name()
+                    replace_in_line(t, substs)
+                    new_code.append(t)
+            # if plain_result_name != None:
+            #     # new_code.append(['new_array', plain_result_name, 'plain_fun_res'] + output_names)
+            #     c = put_const(new_code, len(output_names))
+            #     new_code.append(['make_array', plain_result_name, 'plain_fun_res', c])
+            #     for i, r in enumerate(output_names):
+            #         new_code.append(['set_item', plain_result_name, put_const(new_code, i), r])
+            #         replace_in_line(new_code[-1], substs)
+            # if need_pop:
+            #     new_code.append(['var_setup_pop'])
+        else:
+            new_code.append(l)
+    return pack_modules(new_code, modules, modules_types)
+
+# def unroll_block_from_merkle_damgard(code):
+#     new_code = []
+#     ifs = collect_ifs(code)
+#     lengths = collect_bytes_lengths(code)
+#     for l in code:
+#         if l[0] == 'run_merkle_damgard_with_state':
+#             # print l
+#             # print lengths[l[3]]
+#             if lengths[l[3]] == 'unknown':
+#                 new_code.append(l)
+#                 continue
+#             # вызываем compression function 1 раз с текущим состоянием
+#             res = l[1]
+#             fun = l[2]
+#             offset_inc = ifs[fun]['inputs'] * ifs[fun]['size']
+#             if lengths[l[3]] < offset_inc:
+#                 new_code.append(l)
+#                 continue
+#             inp = l[3]
+#             offset = l[4]
+#             state = l[5:]
+#             # готовим входы для вызова
+#             in_k = ifs[fun]['inputs']
+#             n = put_const(new_code, in_k)
+#             zero = put_const(new_code, 0)
+#             inp2 = new_name()
+#             oi = put_const(new_code, offset_inc)
+#             new_code.append(['bytes_slice', inp2, inp, zero, oi])
+#             split_res = new_name()
+#             new_code.append(['bytes_split_to_nums', split_res, inp2, n])
+#             inps = put_array_parts(new_code, split_res, in_k)
+#             # вызов
+#             fres = new_name()
+#             new_code.append(['invoke_plain', fres, fun] + inps + state)
+#             # новое состояние
+#             out_k = ifs[fun]['outputs']
+#             outs = put_array_parts(new_code, fres, out_k)
+#             # новый оффсет
+#             new_offset = new_name()
+#             new_code.append(['__add__', new_offset, offset, oi])
+#             # длина данных
+#             ll = new_name()
+#             new_code.append(['bytes_len', ll, inp])
+#             # новые данные
+#             data = new_name()
+#             new_code.append(['bytes_slice', data, inp, oi, ll])
+#             # мд
+#             new_code.append(['run_merkle_damgard_with_state', res, fun, data, new_offset] + outs)
+#         else:
+#             new_code.append(l)
+#     return new_code
+
+def unroll_block_from_merkle_damgard(code):
+    new_code = []
+    ifs = collect_ifs(code)
+    lengths = collect_bytes_lengths(code)
+    with L.evaluate_to(new_code):
+        for l in code:
+            if l[0] == 'run_merkle_damgard_with_state':
+                # print l
+                # print lengths[l[3]]
+                if lengths[l[3]] == 'unknown':
+                    new_code.append(l)
+                    continue
+                fun = l[2]
+                offset_inc = ifs[fun]['inputs'] * ifs[fun]['size']
+                if lengths[l[3]] < offset_inc:
+                    new_code.append(l)
+                    continue
+                # вызываем compression function 1 раз с текущим состоянием
+                res = l[1]
+                inp = l[3]
+                offset = l[4]
+                state = l[5:]
+                # с переменными
+                vs = map(L.Var, l)
+                fun_var = vs[2]
+                inp_var = vs[3]
+                offset_var = vs[4]
+                state_vars = vs[5:]
+                inp2 = L.bytes_slice(inp_var, 0, offset_inc)
+                in_k = ifs[fun]['inputs']
+                split_res = L.bytes_split_to_nums(inp2, in_k)
+                inps = [split_res[i] for i in range(in_k)]
+                fres = L.invoke_plain(fun_var, *(inps + state_vars))
+                out_k = ifs[fun]['outputs']
+                outs = [fres[i] for i in range(out_k)]
+                new_offset = offset_var + offset_inc
+                ll = L.bytes_len(inp_var)
+                data = L.bytes_slice(inp, offset_inc, ll)
+                L.run_merkle_damgard_with_state(fun_var, data, new_offset, *outs)
+                # fix result name
+                new_code[-1][1] = res
+            else:
+                new_code.append(l)
+    return new_code
+
+def unroll_merkle_damgard(code):
+    new_code = []
+    ifs = collect_ifs(code)
+    lengths = collect_bytes_lengths(code)
+    with L.evaluate_to(new_code):
+        for l in code:
+            if l[0] == 'run_merkle_damgard' and lengths[l[3]] != 'unknown':
+                res_name = l[1]
+                fun = l[2]
+                inp = l[3]
+                ll = lengths[inp]
+                # %% we don't support other lengths
+                if ll != 192:
+                    print >> sys.stderr, 'Warning: skipped unroll md for len', ll
+                    new_code.append(l)
+                    continue
+                # %% надо бы проверять размер
+                i = ifs[fun]
+                size = i['size']
+                in_k = i['inputs']
+                out_k = i['outputs']
+                endianity = i['endianity']
+                state_values = i['state_var_names_values']
+                # %% we don't support partial words
+                assert ll % size == 0
+                # инты на входе
+                count = ll / size
+                arr_var = L.bytes_split_to_nums(L.Var(inp), count)
+                arr = [arr_var[i] for i in range(count)]
+                state = [L.new_const(int(v)) for n, v in state_values]
+                # полные блоки
+                i = 0
+                while i + in_k <= count:
+                    # вызываем
+                    args = arr[i : i + in_k] + state
+                    # def pp(*a):
+                    #     print 'pp:', a
+                    # L.invoke_plain = pp
+                    r = L.invoke_plain(L.Var(fun), *args)
+                    state = [r[t] for t in range(out_k)]
+                    # переходим к следующему блоку
+                    i += in_k
+                in_ints = arr[i :]
+                if len(in_ints) <= 16 - 3:
+                    b = 0x80 << ((size - 1) * 8)
+                    in_ints.append(L.new_const(b))
+                    while len(in_ints) < 16 - 2:
+                        in_ints.append(L.new_const(0))
+                    if endianity == 'be':
+                        in_ints.append(L.new_const(0))
+                        in_ints.append(L.new_const(ll << 3))
+                    else:
+                        die('not implemented')
+                else:
+                    die('not implemented')
+                r = L.invoke_plain(L.Var(fun), *(in_ints + state))
+                state = [r[i] for i in range(out_k)]
+                res = L.bytes_join_nums(*state)
+                new_code[-1][1] = res_name
+            else:
+                new_code.append(l)
+    return new_code
+
+def compute_const_lengths(code):
+    lengths = collect_bytes_lengths(code)
+    for l in code:
+        if l[0] == 'bytes_len' and lengths[l[2]] != 'unknown':
+            l[0] = 'new_const'
+            l[2] = str(lengths[l[2]])
+    return code
+
+def opt_bytes_concat_slice(code):
+    consts = collect_consts(code)
+    lengths = collect_bytes_lengths(code)
+    parts = {}
+    substs = {}
+    for l in code:
+        replace_in_line(l, substs)
+        if l[0] == 'bytes_concat':
+            parts[(l[1], 0, lengths[l[2]])] = l[2]
+            parts[(l[1], lengths[l[2]], lengths[l[1]])] = l[3]
+        elif l[0] == 'bytes_slice':
+            args = (l[2], int(consts[l[3]]), int(consts[l[4]]))
+            # print args, parts
+            if args in parts:
+                substs[l[1]] = parts[args]
+                l[0] = drop
+    return clean(code)
+
+def opt_bytes_concat_split(code):
+    consts = collect_consts(code)
+    lengths = collect_bytes_lengths(code)
+    sizes = collect_sizes(code)
+    parts = {}
+    parts_arrays = {}
+    new_code = []
+    for l in code:
+        if l[0] == 'bytes_concat':
+            parts[l[1]] = (l[2], l[3])
+        elif l[0] == 'bytes_split_to_nums' and l[2] in parts:
+            # %% предположительно "размер" массива - размер элементов,
+            #  % надо бы проверять, что между нет изменения размера
+            size = sizes[l[1]][0]
+            assert lengths[l[2]] != 'unknown' and lengths[l[2]] % size == 0
+            a, b = parts[l[2]]
+            assert lengths[a] % size == 0 and lengths[b] % size == 0
+            count1 = lengths[a] / size
+            count2 = lengths[b] / size
+            count = int(consts[l[3]])
+            assert count1 + count2 == count
+            n1 = new_name()
+            c1 = put_const(new_code, count1)
+            new_code.append(['bytes_split_to_nums', n1, a, c1])
+            n2 = new_name()
+            c2 = put_const(new_code, count2)
+            new_code.append(['bytes_split_to_nums', n2, b, c2])
+            parts_arrays[l[1]] = (n1, count1, n2, count2, count)
+        elif l[0] == '__getitem__' and l[2] in parts_arrays:
+            p = parts_arrays[l[2]]
+            idx = int(consts[l[3]])
+            if idx >= p[1]:
+                l[2] = p[2]
+                l[3] = put_const(new_code, idx - p[1])
+            else:
+                l[2] = p[0]
+        new_code.append(l)
+    return new_code
+
+def opt_bytes_join_split(code):
+    consts = collect_consts(code)
+    lengths = collect_bytes_lengths(code)
+    joined = {}
+    split = {}
+    new_code = []
+    substs = {}
+    for l in code:
+        if l[0] == 'bytes_join_nums':
+            joined[l[1]] = l[2:]
+        elif l[0] == 'bytes_split_to_nums' and l[2] in joined:
+            split[l[1]] = joined[l[2]]
+        elif l[0] == '__getitem__' and l[2] in split:
+            substs[l[1]] = split[l[2]][int(consts[l[3]])]
+            l[0] = drop
+        new_code.append(l)
+    replace_in_code(new_code, substs)
+    return clean(new_code)
+
+def lift_from_cycle(code, name):
+    idx1, idx2 = find_cycle(code, name)
+    new_code = code[ : idx1]
+    body = code[idx1 + 1 : idx2]
+    track = {}
+    to_append = []
+    for l in body:
+        # %% set_item and __floordiv__
+        if l[0] == 'bytes_assign':
+            track[l[1]] = 1
+    for l in body:
+        if l[0] == 'new_bytes':
+            del track[l[1]]
+    new_body = []
+    for l in body:
+        if instructions[l[0]].return_type != 'void':
+            for k in track.keys():
+                if k in l:
+                    track[l[1]] = 1
+        if any(k in l for k in track):
+            new_body.append(l)
+            continue
+        if instructions[l[0]].return_type != 'void' and l[1] not in track:
+            new_code.append(l)
+        elif l[0].startswith('print_'):
+            new_body.append(l)
+        elif l[0] == 'bytes_assign':
+            new_code.append(l)
+        elif instructions[l[0]].return_type != 'void' and l[1] in track:
+            new_body.append(l)
+        elif l[0].startswith('if_'):
+            new_code.append(l)
+        elif l[0] in ['var_setup', 'assume_length']:
+            new_code.append(l)
+        else:
+            die('unhandled: {0}', l)
+    new_code.append(code[idx1])
+    new_code += new_body
+    new_code += code[idx2 : ]
+    return new_code
+
+# pattern consists of matchers:
+# list represents a line of
+#   number: 1 - single variable, 0 - any number of variables,
+#   string: explicit string,
+#   dict: named placeholder for variable or many variables;
+# string represents a line with such op and any args;
+# dict: group or 'any of' matcher;
+# See pattern_functions list.
+#
+# callback gets a dictionary with matched values and returns new list
+# with ops
+# %% return None to abort this match-replace
+def replace_pattern(code, pattern, fun):
+    # Жадный матчинг: если совпадает текущий кусок, то мы берём
+    # максимум, пока совпадает.
+    # Оптимистичный матчинг: если совпало начало, значит, весь паттерн
+    # должен совпасть.
+    # %% ролбеки?
+    # Упрощаем паттерн: группы разбиваем на отдельные строки, числа
+    # заменяем на словари без имени.
+    np = []
+    m = 'm'
+    n = 'n'
+    # Repack lines
+    for l in pattern:
+        if type(l) == dict and l['type'] == 'group':
+            # %% можно тут ломаться, если имена повторяются
+            for ll in l['matchers']:
+                np.append({ n : l['name'], m : ll })
+        elif type(l) == dict and l['type'] == 'many_any':
+            np.append({ n : None, m : l })
+        elif type(l) == list:
+            np.append({ n : None, m : l })
+    # Repack in lines
+    for l in np:
+        if type(l[m]) == list:
+            for i, v in enumerate(l[m]):
+                if type(v) == int:
+                    assert v == 0 or v == 1
+                    if v == 0:
+                        l[m][i] = pattern_many_vars(None)
+                    elif v == 1:
+                        l[m][i] = pattern_var(None)
+        elif type(l[m]) == str:
+            l[m] = [ l[m], pattern_many_vars(None) ]
+    # for l in np:
+    #     print l
+    d = {}
+    def match(pattern_line, code_line):
+        name = pattern_line[n]
+        p = pattern_line[m]
+        def handle_matched_line():
+            if name != None:
+                if name not in d:
+                    d[name] = []
+                d[name].append(code_line)
+        if type(p) == dict:
+            assert p['type'] == 'many_any'
+            # %% only lines are supported now
+            if code_line[0] in p['matchers']:
+                handle_matched_line()
+                return 0, 1
+            else:
+                # not matched, but it is ok, we did not handle line though
+                return 1, 0
+        else:
+            assert type(p) == list
+            for i, v in enumerate(p):
+                # if v != 'cycle_range':
+                #     print '>>', i, v
+                if type(v) == str:
+                    if v != code_line[i]:
+                        return None
+                elif type(v) == dict:
+                    if v['type'] == 'var':
+                        if v['name'] != None:
+                            assert v['name'] not in d
+                            d[v['name']] = code_line[i]
+                    elif v['type'] == 'reference':
+                        if d[v['name']] != code_line[i]:
+                            return None
+                    elif v['type'] == 'many_vars':
+                        # %% we can't handle many vars in middle
+                        assert i == len(p) - 1
+                        if v['name'] != None:
+                            d[v['name']] = code_line[i:]
+            handle_matched_line()
+            return 1, 1
+    pi = 0
+    ci = 0
+    beginning = []
+    while ci < len(code):
+        r = match(np[pi], code[ci])
+        if r == None:
+            beginning.append(code[ci])
+            ci += 1
+        else:
+            pi += r[0]
+            ci += r[1]
+            break
+    if r == None:
+        die('not matched 1')
+        return code
+    while pi < len(np) and ci < len(code):
+        r = match(np[pi], code[ci])
+        # print
+        # for i, v in d.iteritems():
+        #     if len(i) <= 3:
+        #         print 'd:', i, v
+        # print 'pattern:', np[pi]
+        # print 'code:', code[ci]
+        # print 'result:', r
+        if r == None:
+            die('not matched 2')
+        pi += r[0]
+        ci += r[1]
+    r = beginning + fun(d) + code[ci :]
+    return r
+
+def split_bytes_pbkdf2(code):
+    name = 'rounds'
+    g, v, r, vs, lines = pattern_functions
+    consts = collect_consts(code)
+    pattern = [
+        g('begin', [ 'cycle_range', 1, name, 0 ]),
+        g('split', [ 'bytes_split_to_nums', v('arr'), v('b4'), v('count') ]),
+        g('items', lines('__getitem__')),
+        g('calls', lines('invoke_plain', '__getitem__')),
+        [ 'bytes_join_nums', v('b1'), vs('ns1') ],
+        [ 'bytes_xor', v('b2'), v('b3'), r('b1') ],
+        [ 'bytes_assign', r('b4'), r('b1') ],
+        [ 'bytes_assign', r('b3'), r('b2') ],
+        g('end', [ 'cycle_end', name ])
+    ]
+    def replacement(m):
+        new_code = []
+        arr = L.Var(m['arr'])
+        b4_vs = []
+        # b4's count is same as of all byte strings in question.
+        count = int(consts[m['count']])
+        with L.evaluate_to(new_code):
+            b3_vs = [L.new_var() for i in range(count)]
+            b3_arr = L.bytes_split_to_nums(L.Var(m['b3']), count)
+            for i in range(count):
+                b3_vs[i] // b3_arr[i]
+            b1_vs = map(L.Var, m['ns1'])
+            new_code += m['split']
+            for i in range(count):
+                r = arr[i]
+                v = m['items'][i][1]
+                new_code.append(['new_var', v])
+                v = L.Var(v)
+                v // r
+                b4_vs.append(v)
+            new_code += m['begin']
+            new_code += m['calls']
+            # We replace b3^b1 with xor of each num in b3_vs and ns1
+            # %% mix it in single cycle?
+            b2_vs = [i ^ j for i, j in zip(b3_vs, b1_vs)]
+            for i, j in zip(b2_vs, b3_vs):
+                j // i
+            for i, j in zip(b4_vs, b1_vs):
+                i // j
+            new_code += m['end']
+            r = L.bytes_join_nums(*b3_vs)
+            # new_code[-1][1] = m['b3']
+            L.bytes_assign(L.Var(m['b3']), r)
+        return new_code
+    new_code = replace_pattern(code, pattern, replacement)
+    return new_code
+
+# Late imports, they use this file on their own, keep it in the end
+from bytecode_bitslice import bitslice
+from bytecode_interpreter import interpret

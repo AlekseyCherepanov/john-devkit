@@ -71,8 +71,11 @@ for unused in range(1):
     M = []
     for i in range(16):
         t = input()
-        print_var(t)
+        # print_var(t)
         M.append(t)
+
+    # print_many(*M)
+
     # M = make_array('M', 16)
     # for i in range(16):
     #     t = input()
@@ -119,6 +122,8 @@ for unused in range(1):
     # b0 // b0 + B
     # c0 // c0 + C
     # d0 // d0 + D
+
+# print_many(a0, b0, c0, d0)
 
 for v in a0, b0, c0, d0:
     # print_var(v)
